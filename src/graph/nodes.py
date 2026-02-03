@@ -605,6 +605,11 @@ class ResponseNode(BaseNode):
         storage_path = None
         documentation_files = []
         
+        # Initialize PR variables
+        pr_url = None
+        pr_number = None
+        pr_branch = None
+        
         try:
             # Generate the comprehensive documentation (multiple files)
             docs_dict = generate_documentation(
@@ -639,6 +644,32 @@ class ResponseNode(BaseNode):
                 except Exception as storage_error:
                     self.log(f"Storage upload failed: {storage_error}, continuing with inline docs")
             
+            # Create Pull Request if GitHub token is available
+            github_token = state.get("github_token")
+            
+            if github_token and isinstance(docs_dict, dict):
+                try:
+                    from ..services.github_service import GitHubService
+                    github_service = GitHubService(github_token)
+                    repo_url = state.get("repo_url", "")
+                    
+                    self.log(f"Creating Pull Request for {repo_url}...")
+                    pr_result = await github_service.create_documentation_pr(
+                        repo_url=repo_url,
+                        documentation_files=docs_dict,
+                        pr_title=f"📚 Add AI-generated documentation for {project_name}",
+                    )
+                    
+                    if pr_result.success:
+                        pr_url = pr_result.pr_url
+                        pr_number = pr_result.pr_number
+                        pr_branch = pr_result.branch_name
+                        self.log(f"✅ PR created: {pr_url}")
+                    else:
+                        self.log(f"⚠️ PR creation failed: {pr_result.error}")
+                except Exception as pr_error:
+                    self.log(f"PR creation error: {pr_error}")
+            
             # Create summary documentation for backward compatibility
             # (concatenate key files or use generate_summary_documentation)
             if isinstance(docs_dict, dict):
@@ -670,6 +701,10 @@ class ResponseNode(BaseNode):
             "storage_path": storage_path,
             "architecture_type": hypothesis,
             "reasoning_steps": [step],
+            # PR information
+            "pr_url": pr_url,
+            "pr_number": pr_number,
+            "pr_branch": pr_branch,
         }
 
     def _detect_language_and_framework(

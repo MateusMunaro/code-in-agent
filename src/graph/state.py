@@ -72,6 +72,12 @@ class AgentState(TypedDict):
     architecture_type: Optional[str]
     improvements: list[str]
     
+    # GitHub PR (if token provided)
+    github_token: Optional[str]
+    pr_url: Optional[str]
+    pr_number: Optional[int]
+    pr_branch: Optional[str]
+    
     # Error handling
     error: Optional[str]
 
@@ -82,7 +88,8 @@ def create_initial_state(
     file_tree: list[dict],
     dependency_graph: dict,
     max_iterations: int = 5,
-    job_id: str = None
+    job_id: str = None,
+    github_token: str = None
 ) -> AgentState:
     """
     Create the initial state for the agent.
@@ -94,6 +101,7 @@ def create_initial_state(
         dependency_graph: Dependency graph from graph_builder
         max_iterations: Maximum reasoning iterations
         job_id: Job ID for storage uploads
+        github_token: GitHub OAuth token for creating PRs
         
     Returns:
         Initial AgentState
@@ -118,6 +126,10 @@ def create_initial_state(
         storage_path=None,
         architecture_type=None,
         improvements=[],
+        github_token=github_token,
+        pr_url=None,
+        pr_number=None,
+        pr_branch=None,
         error=None,
     )
 

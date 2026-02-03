@@ -125,6 +125,11 @@ class CodeIndexerWorker:
             "agent_reasoning": analysis.get("reasoning_steps", []),
             "dependencies_graph": analysis.get("dependencies_graph", {}),
             "suggested_improvements": analysis.get("suggested_improvements", []),
+            # PR information
+            "pr_url": analysis.get("pr_url"),
+            "pr_number": analysis.get("pr_number"),
+            "pr_branch": analysis.get("pr_branch"),
+            "pr_status": analysis.get("pr_status", "none"),
         }).execute()
 
     async def process_job(self, job_data: dict):
@@ -132,11 +137,13 @@ class CodeIndexerWorker:
         job_id = job_data["job_id"]
         repo_url = job_data["repo_url"]
         selected_model = job_data.get("selected_model", "gpt-4o-mini")
+        github_token = job_data.get("github_token")  # Token for PR creation
 
         print(f"\n{'='*60}")
         print(f"📦 Processing job: {job_id}")
         print(f"📂 Repository: {repo_url}")
         print(f"🤖 Model: {selected_model}")
+        print(f"🔑 GitHub Token: {'✓ provided' if github_token else '✗ not provided'}")
         print(f"{'='*60}\n")
 
         try:
@@ -168,10 +175,16 @@ class CodeIndexerWorker:
                 dependency_graph=dep_graph,
                 max_iterations=5,  # Limite de iterações para evitar loops infinitos
                 job_id=job_id,  # Pass job_id for storage uploads
+                github_token=github_token,  # Pass token for PR creation
             )
 
             final_state = await agent.ainvoke(initial_state)
             print(f"✅ Agent completed with confidence: {final_state.get('confidence', 0):.2f}")
+
+            # Check if PR was created
+            pr_url = final_state.get("pr_url")
+            if pr_url:
+                print(f"✅ Pull Request created: {pr_url}")
 
             # Step 5: Generate documentation
             await self.publish_status(job_id, "processing", "Generating documentation...", 90)
@@ -186,6 +199,11 @@ class CodeIndexerWorker:
                 "reasoning_steps": final_state.get("reasoning_steps", []),
                 "dependencies_graph": dep_graph,
                 "suggested_improvements": final_state.get("improvements", []),
+                # PR information
+                "pr_url": final_state.get("pr_url"),
+                "pr_number": final_state.get("pr_number"),
+                "pr_branch": final_state.get("pr_branch"),
+                "pr_status": "created" if final_state.get("pr_url") else "none",
             }
 
             # Save to Supabase
