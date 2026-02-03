@@ -117,6 +117,8 @@ class CodeIndexerWorker:
         self.supabase.table("analysis_results").insert({
             "job_id": job_id,
             "documentation": analysis.get("documentation", ""),
+            "documentation_files": analysis.get("documentation_files", []),
+            "storage_path": analysis.get("storage_path"),
             "patterns": analysis.get("patterns", []),
             "architecture_type": analysis.get("architecture_type", "unknown"),
             "confidence_score": analysis.get("confidence_score", 0.0),
@@ -165,6 +167,7 @@ class CodeIndexerWorker:
                 file_tree=file_tree,
                 dependency_graph=dep_graph,
                 max_iterations=5,  # Limite de iterações para evitar loops infinitos
+                job_id=job_id,  # Pass job_id for storage uploads
             )
 
             final_state = await agent.ainvoke(initial_state)
@@ -175,6 +178,8 @@ class CodeIndexerWorker:
             
             analysis_result = {
                 "documentation": final_state.get("documentation", ""),
+                "documentation_files": final_state.get("documentation_files", []),
+                "storage_path": final_state.get("storage_path"),
                 "patterns": final_state.get("patterns_detected", []),
                 "architecture_type": final_state.get("architecture_type", "unknown"),
                 "confidence_score": final_state.get("confidence", 0.0),

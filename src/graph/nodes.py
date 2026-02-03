@@ -600,9 +600,14 @@ class ResponseNode(BaseNode):
         # Generate structured documentation using our templates
         self.log("Using structured documentation templates...")
         
+        # Get job_id from state for storage upload
+        job_id = state.get("job_id", "")
+        storage_path = None
+        documentation_files = []
+        
         try:
-            # Generate the comprehensive documentation
-            documentation = generate_documentation(
+            # Generate the comprehensive documentation (multiple files)
+            docs_dict = generate_documentation(
                 project_name=project_name,
                 architecture_pattern=hypothesis,
                 confidence=state["confidence"],
@@ -616,10 +621,30 @@ class ResponseNode(BaseNode):
                 improvements=improvements,
                 entry_points=entry_points,
                 key_modules=key_modules,
-                output_format="summary",  # Single comprehensive file
+                output_format="full",  # Generate full documentation structure
             )
             
-            self.log(f"Generated {len(documentation)} character documentation")
+            self.log(f"Generated {len(docs_dict)} documentation files")
+            
+            # Upload to Supabase Storage if job_id is available
+            if job_id and isinstance(docs_dict, dict):
+                try:
+                    from ..services.storage_service import get_storage_service
+                    storage_service = get_storage_service()
+                    storage_path, documentation_files = storage_service.upload_documentation(
+                        job_id=job_id,
+                        docs=docs_dict
+                    )
+                    self.log(f"Uploaded {len(documentation_files)} files to storage: {storage_path}")
+                except Exception as storage_error:
+                    self.log(f"Storage upload failed: {storage_error}, continuing with inline docs")
+            
+            # Create summary documentation for backward compatibility
+            # (concatenate key files or use generate_summary_documentation)
+            if isinstance(docs_dict, dict):
+                documentation = self._create_summary_from_full_docs(docs_dict)
+            else:
+                documentation = docs_dict
             
         except Exception as e:
             self.log(f"Structured documentation failed: {e}, using enhanced fallback")
@@ -628,19 +653,21 @@ class ResponseNode(BaseNode):
             )
 
         # Optionally enhance with LLM for more context-specific content
-        if state["confidence"] >= 0.7:
+        if state["confidence"] >= 0.7 and isinstance(documentation, str):
             documentation = await self._enhance_with_llm(state, documentation)
 
         step = ReasoningStep(
             iteration=state["iteration"],
             node="ResponseNode",
             action="Generated structured documentation",
-            observation=f"Created {len(documentation)} char documentation with diagrams and agent rules",
+            observation=f"Created {len(documentation_files) if documentation_files else 1} documentation files",
             confidence_delta=0,
         )
 
         return {
             "documentation": documentation,
+            "documentation_files": documentation_files,
+            "storage_path": storage_path,
             "architecture_type": hypothesis,
             "reasoning_steps": [step],
         }
@@ -866,6 +893,46 @@ Keep it practical and actionable. Return only the section content in Markdown.""
             self.log(f"LLM enhancement failed (non-critical): {e}")
         
         return documentation
+
+    def _create_summary_from_full_docs(self, docs_dict: dict[str, str]) -> str:
+        """
+        Create a summary documentation from the full docs dictionary.
+        
+        Combines key files into a single markdown for backward compatibility.
+        
+        Args:
+            docs_dict: Dictionary of file paths to content
+            
+        Returns:
+            Single markdown string with combined documentation
+        """
+        # Priority order for summary
+        priority_files = [
+            "docs/STRUCTURE.md",
+            "docs/charts/01_ARCHITECTURE_OVERVIEW.md",
+            "docs/charts/02_CLASS_DIAGRAM.md",
+            "docs/usage/00_INDEX.md",
+            "docs/AGENT_RULES.md",
+        ]
+        
+        summary_parts = []
+        
+        # Add priority files first
+        for file_path in priority_files:
+            if file_path in docs_dict:
+                content = docs_dict[file_path]
+                summary_parts.append(content)
+        
+        # Add remaining files as appendix (limited)
+        other_files = [k for k in docs_dict.keys() if k not in priority_files]
+        if other_files:
+            summary_parts.append("\n---\n\n## Additional Documentation\n")
+            summary_parts.append(f"\n*{len(other_files)} additional documentation files available in storage.*\n")
+            summary_parts.append("\n### Available Files:\n")
+            for f in sorted(other_files):
+                summary_parts.append(f"- `{f}`\n")
+        
+        return "\n\n---\n\n".join(summary_parts) if summary_parts else "No documentation generated."
 
 
     def _generate_enhanced_fallback_docs(

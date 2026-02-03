@@ -42,6 +42,7 @@ class AgentState(TypedDict):
     # Repository information
     repo_path: str
     repo_url: str
+    job_id: Optional[str]  # Job ID for storage uploads
     
     # Parsed data from services
     file_tree: list[dict]  # List of FileInfo dicts from parser
@@ -66,6 +67,8 @@ class AgentState(TypedDict):
     
     # Output
     documentation: Optional[str]
+    documentation_files: Optional[list[dict]]  # List of uploaded file metadata
+    storage_path: Optional[str]  # Base storage path in Supabase
     architecture_type: Optional[str]
     improvements: list[str]
     
@@ -78,7 +81,8 @@ def create_initial_state(
     repo_url: str,
     file_tree: list[dict],
     dependency_graph: dict,
-    max_iterations: int = 5
+    max_iterations: int = 5,
+    job_id: str = None
 ) -> AgentState:
     """
     Create the initial state for the agent.
@@ -89,6 +93,7 @@ def create_initial_state(
         file_tree: Parsed file information
         dependency_graph: Dependency graph from graph_builder
         max_iterations: Maximum reasoning iterations
+        job_id: Job ID for storage uploads
         
     Returns:
         Initial AgentState
@@ -96,6 +101,7 @@ def create_initial_state(
     return AgentState(
         repo_path=repo_path,
         repo_url=repo_url,
+        job_id=job_id,
         file_tree=file_tree,
         dependency_graph=dependency_graph,
         files_read=[],
@@ -108,6 +114,8 @@ def create_initial_state(
         iteration=0,
         max_iterations=max_iterations,
         documentation=None,
+        documentation_files=None,
+        storage_path=None,
         architecture_type=None,
         improvements=[],
         error=None,
