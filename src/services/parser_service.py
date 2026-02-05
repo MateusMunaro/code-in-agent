@@ -1,5 +1,9 @@
 """
 Parser service using tree-sitter for AST analysis.
+
+This module provides comprehensive code parsing using Tree-sitter for
+accurate AST analysis, extracting functions, classes, method calls,
+and relationships for building a rich knowledge graph.
 """
 
 import os
@@ -13,26 +17,61 @@ try:
     import tree_sitter_python
     import tree_sitter_javascript
     import tree_sitter_typescript
+    from tree_sitter import Language, Parser
     TREE_SITTER_AVAILABLE = True
 except ImportError:
     TREE_SITTER_AVAILABLE = False
 
 
 @dataclass
+class FunctionDetail:
+    """Detailed information about a function/method extracted from AST."""
+    name: str
+    start_line: int
+    end_line: int
+    parameters: list[str] = field(default_factory=list)
+    return_type: Optional[str] = None
+    decorators: list[str] = field(default_factory=list)
+    docstring: Optional[str] = None
+    calls: list[str] = field(default_factory=list)  # Functions this function calls
+    is_async: bool = False
+    is_method: bool = False
+    parent_class: Optional[str] = None
+
+
+@dataclass
+class ClassDetail:
+    """Detailed information about a class extracted from AST."""
+    name: str
+    start_line: int
+    end_line: int
+    bases: list[str] = field(default_factory=list)  # Parent classes (inheritance)
+    decorators: list[str] = field(default_factory=list)
+    methods: list[str] = field(default_factory=list)  # Method names
+    docstring: Optional[str] = None
+    implements: list[str] = field(default_factory=list)  # Interfaces (for TS/Java)
+
+
+@dataclass
 class FileInfo:
-    """Information about a parsed file."""
+    """Information about a parsed file with rich AST data."""
     path: str
     language: str
     size_bytes: int
     line_count: int
     imports: list[str] = field(default_factory=list)
     exports: list[str] = field(default_factory=list)
-    functions: list[str] = field(default_factory=list)
-    classes: list[str] = field(default_factory=list)
+    functions: list[str] = field(default_factory=list)  # Simple function names
+    classes: list[str] = field(default_factory=list)  # Simple class names
     dependencies: list[str] = field(default_factory=list)
+    
+    # Rich AST data from Tree-sitter
+    function_details: list[FunctionDetail] = field(default_factory=list)
+    class_details: list[ClassDetail] = field(default_factory=list)
+    calls: list[dict] = field(default_factory=list)  # All function calls in file
 
     def to_dict(self) -> dict:
-        """Convert FileInfo to dictionary."""
+        """Convert FileInfo to dictionary with nested dataclass conversion."""
         return asdict(self)
 
 
@@ -83,16 +122,49 @@ CONFIG_FILES = {
 
 
 class ParserService:
-    """Service for parsing code files and extracting structure."""
+    """
+    Service for parsing code files and extracting structure.
+    
+    Uses Tree-sitter for accurate AST parsing when available,
+    with regex fallback for unsupported languages.
+    """
 
     def __init__(self):
-        self.parsers = {}
+        self.parsers: dict[str, Parser] = {}
+        self.languages: dict[str, Language] = {}
         if TREE_SITTER_AVAILABLE:
             self._initialize_parsers()
 
     def _initialize_parsers(self):
         """Initialize tree-sitter parsers for supported languages."""
-        # Note: Full tree-sitter setup requires language-specific parsers
+        try:
+            # Python
+            py_lang = Language(tree_sitter_python.language())
+            py_parser = Parser(py_lang)
+            self.languages["python"] = py_lang
+            self.parsers["python"] = py_parser
+            
+            # JavaScript
+            js_lang = Language(tree_sitter_javascript.language())
+            js_parser = Parser(js_lang)
+            self.languages["javascript"] = js_lang
+            self.parsers["javascript"] = js_parser
+            
+            # TypeScript 
+            ts_lang = Language(tree_sitter_typescript.language_typescript())
+            ts_parser = Parser(ts_lang)
+            self.languages["typescript"] = ts_lang
+            self.parsers["typescript"] = ts_parser
+            
+            # TSX (TypeScript with JSX)
+            tsx_lang = Language(tree_sitter_typescript.language_tsx())
+            tsx_parser = Parser(tsx_lang)
+            self.languages["tsx"] = tsx_lang
+            self.parsers["tsx"] = tsx_parser
+            
+            print(f"[ParserService] Tree-sitter initialized for: {list(self.parsers.keys())}")
+        except Exception as e:
+            print(f"[ParserService] Tree-sitter initialization failed: {e}")
         # This is a simplified version for demonstration
         pass
 
@@ -175,7 +247,7 @@ class ParserService:
         size_bytes: int,
         line_count: int
     ) -> FileInfo:
-        """Analyze a single file and extract structure."""
+        """Analyze a single file and extract structure using Tree-sitter or regex fallback."""
         
         file_info = FileInfo(
             path=file_path,
@@ -184,7 +256,15 @@ class ParserService:
             line_count=line_count,
         )
 
-        # Language-specific parsing
+        # Try Tree-sitter first for supported languages
+        if TREE_SITTER_AVAILABLE and language in self.parsers:
+            try:
+                self._parse_with_treesitter(content, language, file_info)
+                return file_info
+            except Exception as e:
+                print(f"[ParserService] Tree-sitter failed for {file_path}: {e}, falling back to regex")
+
+        # Fallback to regex-based parsing
         if language == "python":
             self._parse_python(content, file_info)
         elif language in ("javascript", "typescript"):
@@ -195,6 +275,317 @@ class ParserService:
             self._parse_go(content, file_info)
 
         return file_info
+
+    def _parse_with_treesitter(self, content: str, language: str, file_info: FileInfo):
+        """
+        Parse code using Tree-sitter for accurate AST analysis.
+        
+        Extracts:
+        - Functions with parameters, return types, decorators, and calls
+        - Classes with inheritance, methods, and docstrings
+        - Import statements
+        - Export statements (JS/TS)
+        - All function calls in the file
+        """
+        parser = self.parsers.get(language)
+        if not parser:
+            return
+        
+        tree = parser.parse(bytes(content, "utf-8"))
+        root = tree.root_node
+        
+        if language == "python":
+            self._extract_python_ast(root, content, file_info)
+        elif language in ("javascript", "typescript", "tsx"):
+            self._extract_js_ts_ast(root, content, file_info, language)
+
+    def _extract_python_ast(self, root, content: str, file_info: FileInfo):
+        """Extract Python AST information using Tree-sitter."""
+        
+        def get_node_text(node) -> str:
+            return content[node.start_byte:node.end_byte]
+        
+        def traverse(node, parent_class: Optional[str] = None):
+            # Import statements
+            if node.type == "import_statement":
+                for child in node.children:
+                    if child.type == "dotted_name":
+                        file_info.imports.append(get_node_text(child))
+            
+            elif node.type == "import_from_statement":
+                module_name = None
+                for child in node.children:
+                    if child.type == "dotted_name":
+                        module_name = get_node_text(child)
+                        break
+                if module_name:
+                    file_info.imports.append(module_name)
+            
+            # Function definitions
+            elif node.type == "function_definition":
+                func_name = None
+                params = []
+                decorators = []
+                is_async = False
+                calls = []
+                docstring = None
+                return_type = None
+                
+                # Check for async
+                for child in node.children:
+                    if child.type == "async":
+                        is_async = True
+                    elif child.type == "name":
+                        func_name = get_node_text(child)
+                    elif child.type == "parameters":
+                        for param in child.children:
+                            if param.type == "identifier":
+                                params.append(get_node_text(param))
+                            elif param.type in ("typed_parameter", "default_parameter"):
+                                for p in param.children:
+                                    if p.type == "identifier":
+                                        params.append(get_node_text(p))
+                                        break
+                    elif child.type == "type":
+                        return_type = get_node_text(child)
+                    elif child.type == "block":
+                        # Get docstring
+                        for block_child in child.children:
+                            if block_child.type == "expression_statement":
+                                for expr in block_child.children:
+                                    if expr.type == "string":
+                                        docstring = get_node_text(expr).strip('"""\'')
+                                        break
+                                break
+                        # Find calls within the function
+                        calls = self._find_calls_in_node(child, content)
+                
+                if func_name:
+                    file_info.functions.append(func_name)
+                    file_info.function_details.append(FunctionDetail(
+                        name=func_name,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parameters=params,
+                        return_type=return_type,
+                        decorators=decorators,
+                        docstring=docstring,
+                        calls=calls,
+                        is_async=is_async,
+                        is_method=parent_class is not None,
+                        parent_class=parent_class,
+                    ))
+            
+            # Class definitions
+            elif node.type == "class_definition":
+                class_name = None
+                bases = []
+                methods = []
+                docstring = None
+                decorators = []
+                
+                for child in node.children:
+                    if child.type == "name":
+                        class_name = get_node_text(child)
+                    elif child.type == "argument_list":
+                        for arg in child.children:
+                            if arg.type == "identifier":
+                                bases.append(get_node_text(arg))
+                    elif child.type == "block":
+                        # Get docstring
+                        for block_child in child.children:
+                            if block_child.type == "expression_statement":
+                                for expr in block_child.children:
+                                    if expr.type == "string":
+                                        docstring = get_node_text(expr).strip('"""\'')
+                                        break
+                                break
+                        # Find methods
+                        for block_child in child.children:
+                            if block_child.type == "function_definition":
+                                traverse(block_child, class_name)
+                                for c in block_child.children:
+                                    if c.type == "name":
+                                        methods.append(get_node_text(c))
+                                        break
+                
+                if class_name:
+                    file_info.classes.append(class_name)
+                    file_info.class_details.append(ClassDetail(
+                        name=class_name,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        bases=bases,
+                        decorators=decorators,
+                        methods=methods,
+                        docstring=docstring,
+                    ))
+                return  # Don't traverse into class again
+            
+            # Call expressions (for file-level calls)
+            elif node.type == "call" and parent_class is None:
+                call_info = self._extract_call_info(node, content)
+                if call_info:
+                    file_info.calls.append(call_info)
+            
+            # Recurse
+            for child in node.children:
+                traverse(child, parent_class)
+        
+        traverse(root)
+
+    def _extract_js_ts_ast(self, root, content: str, file_info: FileInfo, language: str):
+        """Extract JavaScript/TypeScript AST information using Tree-sitter."""
+        
+        def get_node_text(node) -> str:
+            return content[node.start_byte:node.end_byte]
+        
+        def traverse(node, parent_class: Optional[str] = None):
+            # Import statements
+            if node.type == "import_statement":
+                for child in node.children:
+                    if child.type == "string":
+                        import_path = get_node_text(child).strip("'\"")
+                        file_info.imports.append(import_path)
+            
+            # Export statements
+            elif node.type in ("export_statement", "export_clause"):
+                for child in node.children:
+                    if child.type == "identifier":
+                        file_info.exports.append(get_node_text(child))
+            
+            # Function declarations
+            elif node.type in ("function_declaration", "method_definition", "arrow_function"):
+                func_name = None
+                params = []
+                is_async = False
+                calls = []
+                
+                for child in node.children:
+                    if child.type == "async":
+                        is_async = True
+                    elif child.type == "identifier":
+                        func_name = get_node_text(child)
+                    elif child.type == "property_identifier":
+                        func_name = get_node_text(child)
+                    elif child.type == "formal_parameters":
+                        for param in child.children:
+                            if param.type == "identifier":
+                                params.append(get_node_text(param))
+                            elif param.type == "required_parameter":
+                                for p in param.children:
+                                    if p.type == "identifier":
+                                        params.append(get_node_text(p))
+                                        break
+                    elif child.type == "statement_block":
+                        calls = self._find_calls_in_node(child, content)
+                
+                if func_name:
+                    file_info.functions.append(func_name)
+                    file_info.function_details.append(FunctionDetail(
+                        name=func_name,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        parameters=params,
+                        is_async=is_async,
+                        is_method=parent_class is not None,
+                        parent_class=parent_class,
+                        calls=calls,
+                    ))
+            
+            # Class declarations
+            elif node.type == "class_declaration":
+                class_name = None
+                bases = []
+                implements = []
+                methods = []
+                
+                for child in node.children:
+                    if child.type == "type_identifier" or child.type == "identifier":
+                        if class_name is None:
+                            class_name = get_node_text(child)
+                    elif child.type == "class_heritage":
+                        for heritage in child.children:
+                            if heritage.type == "extends_clause":
+                                for h in heritage.children:
+                                    if h.type in ("type_identifier", "identifier"):
+                                        bases.append(get_node_text(h))
+                            elif heritage.type == "implements_clause":
+                                for h in heritage.children:
+                                    if h.type in ("type_identifier", "identifier"):
+                                        implements.append(get_node_text(h))
+                    elif child.type == "class_body":
+                        for body_child in child.children:
+                            if body_child.type == "method_definition":
+                                traverse(body_child, class_name)
+                                for c in body_child.children:
+                                    if c.type in ("property_identifier", "identifier"):
+                                        methods.append(get_node_text(c))
+                                        break
+                
+                if class_name:
+                    file_info.classes.append(class_name)
+                    file_info.class_details.append(ClassDetail(
+                        name=class_name,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        bases=bases,
+                        methods=methods,
+                        implements=implements,
+                    ))
+                return
+            
+            # Recurse
+            for child in node.children:
+                traverse(child, parent_class)
+        
+        traverse(root)
+
+    def _find_calls_in_node(self, node, content: str) -> list[str]:
+        """Find all function calls within a node."""
+        calls = []
+        
+        def get_node_text(n) -> str:
+            return content[n.start_byte:n.end_byte]
+        
+        def traverse(n):
+            if n.type == "call":
+                for child in n.children:
+                    if child.type == "identifier":
+                        calls.append(get_node_text(child))
+                    elif child.type == "attribute":
+                        calls.append(get_node_text(child))
+            elif n.type == "call_expression":
+                for child in n.children:
+                    if child.type == "identifier":
+                        calls.append(get_node_text(child))
+                    elif child.type == "member_expression":
+                        calls.append(get_node_text(child))
+            
+            for child in n.children:
+                traverse(child)
+        
+        traverse(node)
+        return list(set(calls))  # Dedupe
+
+    def _extract_call_info(self, node, content: str) -> Optional[dict]:
+        """Extract call information from a call node."""
+        def get_node_text(n) -> str:
+            return content[n.start_byte:n.end_byte]
+        
+        call_name = None
+        for child in node.children:
+            if child.type == "identifier":
+                call_name = get_node_text(child)
+            elif child.type == "attribute":
+                call_name = get_node_text(child)
+        
+        if call_name:
+            return {
+                "name": call_name,
+                "line": node.start_point[0] + 1,
+            }
+        return None
 
     def _parse_python(self, content: str, file_info: FileInfo):
         """Extract Python imports, functions, and classes."""

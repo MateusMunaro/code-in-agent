@@ -47,11 +47,14 @@ class GraphBuilder:
 
     async def build_graph(self, repo_path: str, files_info: list) -> dict:
         """
-        Build a dependency graph from parsed files.
+        Build a comprehensive dependency graph from parsed files.
+        
+        Creates nodes for files, functions, and classes, then builds
+        edges for: imports, calls, extends (inheritance), implements.
         
         Args:
             repo_path: Path to the repository
-            files_info: List of FileInfo dicts from parser
+            files_info: List of FileInfo dicts from parser (with function_details, class_details)
             
         Returns:
             Graph as a dictionary with nodes and edges
@@ -59,6 +62,10 @@ class GraphBuilder:
         self.clear()
 
         def _build():
+            # Build lookup maps for resolving references
+            function_map = {}  # func_name -> list of func_ids
+            class_map = {}     # class_name -> list of class_ids
+            
             # Create file nodes
             for file_info in files_info:
                 node_id = f"file:{file_info['path']}"
@@ -76,42 +83,150 @@ class GraphBuilder:
                     }
                 )
 
-                # Create function nodes
-                for func_name in file_info['functions']:
+                # Create function nodes with rich metadata
+                function_details = file_info.get('function_details', [])
+                for func_detail in function_details:
+                    if isinstance(func_detail, dict):
+                        func_name = func_detail.get('name', '')
+                    else:
+                        func_name = getattr(func_detail, 'name', '')
+                    
+                    if not func_name:
+                        continue
+                        
                     func_id = f"function:{file_info['path']}:{func_name}"
+                    
+                    # Store metadata from AST
+                    metadata = {}
+                    if isinstance(func_detail, dict):
+                        metadata = {
+                            "start_line": func_detail.get('start_line'),
+                            "end_line": func_detail.get('end_line'),
+                            "parameters": func_detail.get('parameters', []),
+                            "is_async": func_detail.get('is_async', False),
+                            "is_method": func_detail.get('is_method', False),
+                            "parent_class": func_detail.get('parent_class'),
+                            "docstring": func_detail.get('docstring'),
+                        }
+                    
                     self.nodes[func_id] = GraphNode(
                         id=func_id,
                         path=file_info['path'],
                         type="function",
                         name=func_name,
                         language=file_info['language'],
+                        metadata=metadata,
                     )
+                    
+                    # Track for call resolution
+                    if func_name not in function_map:
+                        function_map[func_name] = []
+                    function_map[func_name].append(func_id)
+                    
                     # Edge from file to function
                     self.edges.append(GraphEdge(
                         source=node_id,
                         target=func_id,
                         type="contains",
                     ))
+                
+                # Fallback for files without function_details (legacy)
+                if not function_details:
+                    for func_name in file_info.get('functions', []):
+                        func_id = f"function:{file_info['path']}:{func_name}"
+                        self.nodes[func_id] = GraphNode(
+                            id=func_id,
+                            path=file_info['path'],
+                            type="function",
+                            name=func_name,
+                            language=file_info['language'],
+                        )
+                        if func_name not in function_map:
+                            function_map[func_name] = []
+                        function_map[func_name].append(func_id)
+                        self.edges.append(GraphEdge(
+                            source=node_id,
+                            target=func_id,
+                            type="contains",
+                        ))
 
-                # Create class nodes
-                for class_name in file_info['classes']:
+                # Create class nodes with rich metadata
+                class_details = file_info.get('class_details', [])
+                for class_detail in class_details:
+                    if isinstance(class_detail, dict):
+                        class_name = class_detail.get('name', '')
+                    else:
+                        class_name = getattr(class_detail, 'name', '')
+                    
+                    if not class_name:
+                        continue
+                    
                     class_id = f"class:{file_info['path']}:{class_name}"
+                    
+                    # Store metadata from AST
+                    metadata = {}
+                    if isinstance(class_detail, dict):
+                        metadata = {
+                            "start_line": class_detail.get('start_line'),
+                            "end_line": class_detail.get('end_line'),
+                            "bases": class_detail.get('bases', []),
+                            "methods": class_detail.get('methods', []),
+                            "implements": class_detail.get('implements', []),
+                            "docstring": class_detail.get('docstring'),
+                        }
+                    
                     self.nodes[class_id] = GraphNode(
                         id=class_id,
                         path=file_info['path'],
                         type="class",
                         name=class_name,
                         language=file_info['language'],
+                        metadata=metadata,
                     )
+                    
+                    # Track for inheritance resolution
+                    if class_name not in class_map:
+                        class_map[class_name] = []
+                    class_map[class_name].append(class_id)
+                    
                     # Edge from file to class
                     self.edges.append(GraphEdge(
                         source=node_id,
                         target=class_id,
                         type="contains",
                     ))
+                
+                # Fallback for files without class_details (legacy)
+                if not class_details:
+                    for class_name in file_info.get('classes', []):
+                        class_id = f"class:{file_info['path']}:{class_name}"
+                        self.nodes[class_id] = GraphNode(
+                            id=class_id,
+                            path=file_info['path'],
+                            type="class",
+                            name=class_name,
+                            language=file_info['language'],
+                        )
+                        if class_name not in class_map:
+                            class_map[class_name] = []
+                        class_map[class_name].append(class_id)
+                        self.edges.append(GraphEdge(
+                            source=node_id,
+                            target=class_id,
+                            type="contains",
+                        ))
 
             # Create import edges
             self._build_import_edges(files_info, repo_path)
+            
+            # Create CALLS edges from function_details
+            self._build_call_edges(files_info, function_map)
+            
+            # Create EXTENDS (inheritance) edges from class_details
+            self._build_inheritance_edges(files_info, class_map)
+            
+            # Create IMPLEMENTS edges from class_details (for TS/Java interfaces)
+            self._build_implements_edges(files_info, class_map)
 
             return self._to_dict()
 
@@ -178,6 +293,138 @@ class GraphBuilder:
                             type="imports",
                             metadata={"import_name": imp}
                         ))
+
+    def _build_call_edges(self, files_info: list, function_map: dict):
+        """
+        Build CALLS edges between functions based on function_details.
+        
+        For each function, look at its `calls` list and resolve to target functions.
+        """
+        for file_info in files_info:
+            function_details = file_info.get('function_details', [])
+            
+            for func_detail in function_details:
+                if isinstance(func_detail, dict):
+                    func_name = func_detail.get('name', '')
+                    calls = func_detail.get('calls', [])
+                else:
+                    func_name = getattr(func_detail, 'name', '')
+                    calls = getattr(func_detail, 'calls', [])
+                
+                if not func_name or not calls:
+                    continue
+                
+                source_id = f"function:{file_info['path']}:{func_name}"
+                
+                for call_name in calls:
+                    # Resolve call_name to function node(s)
+                    # Simple name matching (could be improved with scope analysis)
+                    base_call_name = call_name.split('.')[-1] if '.' in call_name else call_name
+                    
+                    if base_call_name in function_map:
+                        # Prefer function in same file, otherwise take first match
+                        target_ids = function_map[base_call_name]
+                        
+                        target_id = None
+                        for tid in target_ids:
+                            if file_info['path'] in tid:
+                                target_id = tid
+                                break
+                        if not target_id and target_ids:
+                            target_id = target_ids[0]
+                        
+                        if target_id and target_id != source_id:
+                            self.edges.append(GraphEdge(
+                                source=source_id,
+                                target=target_id,
+                                type="calls",
+                                metadata={"call_expression": call_name}
+                            ))
+
+    def _build_inheritance_edges(self, files_info: list, class_map: dict):
+        """
+        Build EXTENDS edges between classes based on class_details.bases.
+        
+        For each class, look at its `bases` (parent classes) and resolve.
+        """
+        for file_info in files_info:
+            class_details = file_info.get('class_details', [])
+            
+            for class_detail in class_details:
+                if isinstance(class_detail, dict):
+                    class_name = class_detail.get('name', '')
+                    bases = class_detail.get('bases', [])
+                else:
+                    class_name = getattr(class_detail, 'name', '')
+                    bases = getattr(class_detail, 'bases', [])
+                
+                if not class_name or not bases:
+                    continue
+                
+                source_id = f"class:{file_info['path']}:{class_name}"
+                
+                for base_name in bases:
+                    if base_name in class_map:
+                        target_ids = class_map[base_name]
+                        
+                        # Prefer class in same file
+                        target_id = None
+                        for tid in target_ids:
+                            if file_info['path'] in tid:
+                                target_id = tid
+                                break
+                        if not target_id and target_ids:
+                            target_id = target_ids[0]
+                        
+                        if target_id and target_id != source_id:
+                            self.edges.append(GraphEdge(
+                                source=source_id,
+                                target=target_id,
+                                type="extends",
+                                metadata={"base_class": base_name}
+                            ))
+
+    def _build_implements_edges(self, files_info: list, class_map: dict):
+        """
+        Build IMPLEMENTS edges between classes and interfaces (for TS/Java).
+        
+        For each class, look at its `implements` list and resolve.
+        """
+        for file_info in files_info:
+            class_details = file_info.get('class_details', [])
+            
+            for class_detail in class_details:
+                if isinstance(class_detail, dict):
+                    class_name = class_detail.get('name', '')
+                    implements = class_detail.get('implements', [])
+                else:
+                    class_name = getattr(class_detail, 'name', '')
+                    implements = getattr(class_detail, 'implements', [])
+                
+                if not class_name or not implements:
+                    continue
+                
+                source_id = f"class:{file_info['path']}:{class_name}"
+                
+                for interface_name in implements:
+                    if interface_name in class_map:
+                        target_ids = class_map[interface_name]
+                        
+                        target_id = None
+                        for tid in target_ids:
+                            if file_info['path'] in tid:
+                                target_id = tid
+                                break
+                        if not target_id and target_ids:
+                            target_id = target_ids[0]
+                        
+                        if target_id and target_id != source_id:
+                            self.edges.append(GraphEdge(
+                                source=source_id,
+                                target=target_id,
+                                type="implements",
+                                metadata={"interface": interface_name}
+                            ))
 
     def _to_dict(self) -> dict:
         """Convert the graph to a dictionary format."""
