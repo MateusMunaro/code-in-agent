@@ -646,6 +646,7 @@ class ResponseNode(BaseNode):
             
             # Create Pull Request if GitHub token is available
             github_token = state.get("github_token")
+            self.log(f"GitHub token available: {bool(github_token)}")
             
             if github_token and isinstance(docs_dict, dict):
                 try:
