@@ -1,8 +1,8 @@
 """
 LangGraph graph orchestration for the code analysis agent.
 
-Creates the reasoning loop:
-ReadStructure → Planning → Verification → (loop back or) Response
+Creates the reasoning loop with embeddings and semantic search:
+ReadStructure → Embeddings → Planning → Verification → SemanticSearch → (loop back or) Response
 """
 
 from typing import Literal
@@ -10,7 +10,7 @@ from typing import Literal
 from langgraph.graph import StateGraph, END
 
 from .state import AgentState, create_initial_state
-from .nodes import ReadStructureNode, PlanningNode, VerificationNode, ResponseNode
+from .nodes import ReadStructureNode, PlanningNode, VerificationNode, ResponseNode, EmbeddingsNode, SemanticSearchNode
 from ..llm.provider import MultiModelChat, get_chat_model
 from ..services.git_service import GitService
 from ..config import settings
@@ -81,8 +81,10 @@ def create_agent_graph(model_id: str = None) -> StateGraph:
     
     # Create nodes
     read_structure = ReadStructureNode(chat, git_service)
+    embeddings = EmbeddingsNode(chat, git_service)
     planning = PlanningNode(chat, git_service)
     verification = VerificationNode(chat, git_service)
+    semantic_search = SemanticSearchNode(chat, git_service)
     response = ResponseNode(chat, git_service)
     
     # Build graph
@@ -90,17 +92,22 @@ def create_agent_graph(model_id: str = None) -> StateGraph:
     
     # Add nodes
     workflow.add_node("read_structure", read_structure)
+    workflow.add_node("embeddings", embeddings)
     workflow.add_node("planning", planning)
     workflow.add_node("verification", verification)
+    workflow.add_node("semantic_search", semantic_search)
     workflow.add_node("response", response)
     
     # Set entry point
     workflow.set_entry_point("read_structure")
     
     # Add edges
-    # After reading structure, decide if we need more info or can respond
+    # After reading structure, generate embeddings
+    workflow.add_edge("read_structure", "embeddings")
+    
+    # After embeddings, decide if we need more info or can respond
     workflow.add_conditional_edges(
-        "read_structure",
+        "embeddings",
         should_continue,
         {
             "planning": "planning",
@@ -118,9 +125,12 @@ def create_agent_graph(model_id: str = None) -> StateGraph:
         }
     )
     
-    # After verification, go back to planning or to response
+    # After verification, do semantic search
+    workflow.add_edge("verification", "semantic_search")
+    
+    # After semantic search, go back to planning or to response
     workflow.add_conditional_edges(
-        "verification",
+        "semantic_search",
         should_continue,
         {
             "planning": "planning",
@@ -196,18 +206,22 @@ def get_graph_visualization() -> str:
 ```mermaid
 graph TD
     A[Start] --> B[ReadStructureNode]
-    B --> C{Confidence >= 80%?}
-    C -->|No| D[PlanningNode]
-    C -->|Yes| G[ResponseNode]
-    D --> E{Files to read?}
-    E -->|Yes| F[VerificationNode]
-    E -->|No| G
-    F --> C
-    G --> H[End]
+    B --> C[EmbeddingsNode]
+    C --> D{Confidence >= 80%?}
+    D -->|No| E[PlanningNode]
+    D -->|Yes| I[ResponseNode]
+    E --> F{Files to read?}
+    F -->|Yes| G[VerificationNode]
+    F -->|No| I
+    G --> H[SemanticSearchNode]
+    H --> D
+    I --> J[End]
     
     style B fill:#e1f5fe
-    style D fill:#fff3e0
-    style F fill:#e8f5e9
-    style G fill:#fce4ec
+    style C fill:#e0f7fa
+    style E fill:#fff3e0
+    style G fill:#e8f5e9
+    style H fill:#f3e5f5
+    style I fill:#fce4ec
 ```
 """

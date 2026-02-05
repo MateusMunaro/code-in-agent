@@ -28,6 +28,8 @@ class EmbeddingService:
 
     def _detect_provider(self) -> str:
         """Detect the best available embedding provider."""
+        if settings.google_api_key:
+            return "google"
         if settings.openai_api_key:
             return "openai"
         return "ollama"
@@ -43,6 +45,13 @@ class EmbeddingService:
             self._embeddings = OpenAIEmbeddings(
                 model=self.model,
                 api_key=settings.openai_api_key,
+            )
+        elif self.provider == "google":
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+            self._embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001",  # Google's text embedding model
+                google_api_key=settings.google_api_key,
             )
         elif self.provider == "ollama":
             from langchain_ollama import OllamaEmbeddings

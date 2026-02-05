@@ -881,9 +881,11 @@ Before creating code, check:
     Business --> Data"""
 
     def _generate_class_mermaid(self) -> str:
-        """Generate class diagram from analysis."""
-        # Extract classes from dependency graph
+        """Generate class diagram from actual code analysis."""
+        # Extract classes and their relationships from dependency graph
         nodes = self.analysis.dependency_graph.get("nodes", [])
+        edges = self.analysis.dependency_graph.get("edges", [])
+        
         classes = [n for n in nodes if n.get("type") == "class"]
         
         if not classes:
@@ -899,11 +901,46 @@ Before creating code, check:
     
     Entity <-- Service : uses"""
         
-        # Build class diagram from detected classes
+        # Build class diagram from detected classes with real data
         lines = ["classDiagram"]
-        for cls in classes[:10]:  # Limit to 10 classes
+        class_ids = set()
+        
+        for cls in classes[:15]:  # Limit to 15 classes
             name = cls.get("name", "Unknown")
-            lines.append(f"    class {name}")
+            metadata = cls.get("metadata", {})
+            methods = metadata.get("methods", [])
+            
+            # Sanitize class name for Mermaid
+            safe_name = name.replace("-", "_").replace(".", "_")
+            class_ids.add(cls.get("id", ""))
+            
+            lines.append(f"    class {safe_name} {{")
+            
+            # Add methods if available
+            for method in methods[:5]:  # Limit methods shown
+                lines.append(f"        +{method}()")
+            
+            lines.append("    }")
+        
+        # Add inheritance relationships (extends edges)
+        for edge in edges:
+            if edge.get("type") == "extends":
+                source_name = edge.get("source", "").split(":")[-1]
+                target_name = edge.get("target", "").split(":")[-1]
+                source_safe = source_name.replace("-", "_").replace(".", "_")
+                target_safe = target_name.replace("-", "_").replace(".", "_")
+                if source_safe and target_safe:
+                    lines.append(f"    {target_safe} <|-- {source_safe}")
+        
+        # Add implements relationships
+        for edge in edges:
+            if edge.get("type") == "implements":
+                source_name = edge.get("source", "").split(":")[-1]
+                target_name = edge.get("target", "").split(":")[-1]
+                source_safe = source_name.replace("-", "_").replace(".", "_")
+                target_safe = target_name.replace("-", "_").replace(".", "_")
+                if source_safe and target_safe:
+                    lines.append(f"    {target_safe} <|.. {source_safe} : implements")
         
         return "\n".join(lines)
 
@@ -978,8 +1015,9 @@ Before creating code, check:
     Logic --> Response"""
 
     def _generate_dependency_mermaid(self) -> str:
-        """Generate dependency graph Mermaid."""
-        edges = self.analysis.dependency_graph.get("edges", [])[:20]  # Limit edges
+        """Generate dependency graph Mermaid from actual code relationships."""
+        edges = self.analysis.dependency_graph.get("edges", [])
+        nodes = self.analysis.dependency_graph.get("nodes", [])
         
         if not edges:
             return """flowchart TB
@@ -989,23 +1027,52 @@ Before creating code, check:
         lines = ["flowchart TB"]
         seen_nodes = set()
         
-        for edge in edges:
-            source = edge.get("source", "").replace("file:", "").split("/")[-1]
-            target = edge.get("target", "").replace("file:", "").split("/")[-1]
-            
-            if source and target and source != target:
-                # Clean names for Mermaid
-                source_clean = source.replace(".", "_").replace("-", "_")[:20]
-                target_clean = target.replace(".", "_").replace("-", "_")[:20]
+        # Separate edges by type
+        import_edges = [e for e in edges if e.get("type") == "imports"][:15]
+        call_edges = [e for e in edges if e.get("type") == "calls"][:15]
+        
+        # Add subgraph for file imports
+        if import_edges:
+            lines.append("    subgraph Imports[File Dependencies]")
+            for edge in import_edges:
+                source = edge.get("source", "").replace("file:", "").split("/")[-1]
+                target = edge.get("target", "").replace("file:", "").split("/")[-1]
                 
-                if source_clean not in seen_nodes:
-                    lines.append(f"    {source_clean}[{source[:15]}]")
-                    seen_nodes.add(source_clean)
-                if target_clean not in seen_nodes:
-                    lines.append(f"    {target_clean}[{target[:15]}]")
-                    seen_nodes.add(target_clean)
+                if source and target and source != target:
+                    source_clean = source.replace(".", "_").replace("-", "_")[:20]
+                    target_clean = target.replace(".", "_").replace("-", "_")[:20]
+                    
+                    if source_clean not in seen_nodes:
+                        lines.append(f"        {source_clean}[{source[:15]}]")
+                        seen_nodes.add(source_clean)
+                    if target_clean not in seen_nodes:
+                        lines.append(f"        {target_clean}[{target[:15]}]")
+                        seen_nodes.add(target_clean)
+                    
+                    lines.append(f"        {source_clean} --> {target_clean}")
+            lines.append("    end")
+        
+        # Add subgraph for function calls
+        if call_edges:
+            lines.append("    subgraph Calls[Function Calls]")
+            call_nodes = set()
+            for edge in call_edges:
+                source = edge.get("source", "").split(":")[-1]
+                target = edge.get("target", "").split(":")[-1]
                 
-                lines.append(f"    {source_clean} --> {target_clean}")
+                if source and target and source != target:
+                    source_clean = f"fn_{source.replace('.', '_').replace('-', '_')[:15]}"
+                    target_clean = f"fn_{target.replace('.', '_').replace('-', '_')[:15]}"
+                    
+                    if source_clean not in call_nodes:
+                        lines.append(f"        {source_clean}({source[:12]})")
+                        call_nodes.add(source_clean)
+                    if target_clean not in call_nodes:
+                        lines.append(f"        {target_clean}({target[:12]})")
+                        call_nodes.add(target_clean)
+                    
+                    lines.append(f"        {source_clean} -.-> {target_clean}")
+            lines.append("    end")
         
         return "\n".join(lines) if len(lines) > 1 else """flowchart TB
     A[Module A] --> B[Module B]"""

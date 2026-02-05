@@ -31,6 +31,25 @@ class PatternInfo(TypedDict):
     confidence: float
 
 
+class CodeChunk(TypedDict):
+    """A chunk of code with its embedding for semantic search."""
+    content: str
+    file_path: str
+    language: str
+    chunk_type: str  # "function", "class", "module"
+    name: Optional[str]  # Function or class name
+    start_line: int
+    end_line: int
+    embedding: Optional[list[float]]
+
+
+class SemanticResult(TypedDict):
+    """A result from semantic search."""
+    chunk: CodeChunk
+    score: float
+    relevance: str
+
+
 class AgentState(TypedDict):
     """
     The state that flows through the LangGraph agent.
@@ -64,6 +83,12 @@ class AgentState(TypedDict):
     reasoning_steps: Annotated[list[ReasoningStep], add]
     iteration: int
     max_iterations: int
+    
+    # Embeddings and Semantic Search
+    code_chunks: Optional[list[CodeChunk]]  # Code chunks with embeddings
+    embeddings_ready: bool  # Whether embeddings have been generated
+    semantic_query: Optional[str]  # Current semantic search query
+    semantic_results: Optional[list[SemanticResult]]  # Results from semantic search
     
     # Output
     documentation: Optional[str]
@@ -121,6 +146,12 @@ def create_initial_state(
         reasoning_steps=[],
         iteration=0,
         max_iterations=max_iterations,
+        # Embeddings and semantic search
+        code_chunks=None,
+        embeddings_ready=False,
+        semantic_query=None,
+        semantic_results=None,
+        # Output
         documentation=None,
         documentation_files=None,
         storage_path=None,
