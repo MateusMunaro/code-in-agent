@@ -1,14 +1,21 @@
 """
-Agent Guidelines Generator.
+Agent Guidelines Generator — Backward-compatibility wrapper.
 
-Generates specific guidelines for AI coding assistants based on
-the analyzed codebase patterns and architecture.
+The actual implementation has been moved to ``root_level.AgentsMdGenerator``
+as part of the multi-layer documentation architecture.
+
+This module preserves the old public API so existing call-sites
+(``generate_agent_guidelines()``, ``AgentGuidelinesGenerator``,
+``ProjectContext``) continue to work without changes.
 """
 
 from dataclasses import dataclass
 from typing import Optional
-from datetime import datetime
 
+from .root_level import AgentsMdGenerator, ProjectProfile
+
+
+# ─── Legacy dataclass (maps 1:1 to root_level fields) ───────────
 
 @dataclass
 class ProjectContext:
@@ -21,7 +28,7 @@ class ProjectContext:
     tech_stack: dict = None
     entry_points: list = None
     key_modules: list = None
-    
+
     def __post_init__(self):
         if self.patterns_detected is None:
             self.patterns_detected = []
@@ -33,592 +40,35 @@ class ProjectContext:
             self.key_modules = []
 
 
+# ─── Legacy class (thin delegate) ───────────────────────────────
+
 class AgentGuidelinesGenerator:
     """
     Generates AI-friendly guidelines based on codebase analysis.
-    
-    These guidelines help AI coding assistants understand:
-    - Project conventions and patterns
-    - File structure and navigation
-    - Code style and best practices
-    - What to do and what to avoid
+    Delegates to ``root_level.AgentsMdGenerator``.
     """
-    
+
     def __init__(self, context: ProjectContext):
         self.context = context
-        self.date = datetime.now().strftime("%B %Y")
-    
+        self._delegate = AgentsMdGenerator(
+            project_name=context.project_name,
+            architecture_pattern=context.architecture_pattern,
+            main_language=context.main_language,
+            framework=context.framework,
+            patterns_detected=context.patterns_detected,
+            tech_stack=context.tech_stack,
+            entry_points=context.entry_points,
+            key_modules=context.key_modules,
+            profile=ProjectProfile(),  # default profile
+            module_paths=[],
+        )
+
     def generate_full_guidelines(self) -> str:
-        """Generate complete agent guidelines document."""
-        return f"""# 🤖 Rules for AI Agents - {self.context.project_name}
+        """Generate complete AGENTS.md content."""
+        return self._delegate.generate()
 
-> Specific guidelines for AI agents working with this codebase.
-> Read this document **BEFORE** making any code changes.
 
-**Architecture:** {self.context.architecture_pattern}  
-**Main Language:** {self.context.main_language}  
-**Framework:** {self.context.framework or 'N/A'}  
-**Last Updated:** {self.date}
-
----
-
-## 📋 Index
-
-- [Project Context](#project-context)
-- [Documentation Navigation](#documentation-navigation)
-- [File Structure](#file-structure)
-- [Code Patterns](#code-patterns)
-- [Naming Conventions](#naming-conventions)
-- [Dependencies and Imports](#dependencies-and-imports)
-- [Anti-Patterns](#anti-patterns)
-- [Checklist Before Committing](#checklist-before-committing)
-
----
-
-## Project Context
-
-{self._generate_project_context()}
-
----
-
-## Documentation Navigation
-
-### Golden Rule
-```
-ALWAYS start reading in this order:
-1. This file (AGENT_RULES.md) ─ You are here
-2. /docs/usage/00_INDEX.md ─ To know which guide to follow
-3. The specific guide for your task ─ Only ONE at a time
-4. Documents from /context/ ─ Only when referenced
-```
-
-### Decision Tree
-
-```
-What do you need to do?
-│
-├─► Create new component/module?
-│   └─► Read: /docs/usage/02_CODE_PATTERNS.md
-│
-├─► Understand data flow?
-│   └─► Read: /docs/usage/03_DATA_FLOW.md
-│
-├─► Add new feature?
-│   └─► Read: /docs/usage/04_ADDING_FEATURES.md
-│
-├─► Understand general architecture?
-│   └─► Read: /docs/charts/01_ARCHITECTURE_OVERVIEW.md
-│
-└─► Debug or maintenance?
-    └─► Read: /docs/charts/06_DEPENDENCY_GRAPH.md
-```
-
-### ⚠️ DON'T DO
-- Don't load all documents at once
-- Don't ignore documentation and go straight to code
-- Don't modify code without checking patterns
-
----
-
-## File Structure
-
-{self._generate_file_structure_rules()}
-
----
-
-## Code Patterns
-
-{self._generate_code_pattern_rules()}
-
----
-
-## Naming Conventions
-
-{self._generate_naming_conventions()}
-
----
-
-## Dependencies and Imports
-
-{self._generate_import_rules()}
-
----
-
-## Useful Commands
-
-{self._generate_useful_commands()}
-
----
-
-## Anti-Patterns
-
-> ⛔ What **NOT** to do in this project
-
-{self._generate_anti_patterns()}
-
----
-
-## Checklist Before Committing
-
-```
-□ Does the code follow patterns documented in /docs/context/PATTERNS.md?
-□ Are new components in the correct folder?
-□ Do imports follow project conventions?
-□ Is there no duplicate code of something that already exists?
-□ Were tests added/updated?
-□ Was documentation updated if needed?
-```
-
----
-
-## Key Modules
-
-{self._generate_key_modules_section()}
-
----
-
-## Entry Points
-
-{self._generate_entry_points_section()}
-
----
-
-*Automatically generated by Code Analysis Agent*  
-*Last updated: {self.date}*
-"""
-
-    def _generate_project_context(self) -> str:
-        """Generate project context section."""
-        patterns_list = "\n".join(
-            f"- **{p.get('name', 'Unknown')}**: {p.get('description', 'N/A')}"
-            for p in self.context.patterns_detected[:5]
-        ) if self.context.patterns_detected else "- No specific patterns detected"
-        
-        tech_list = "\n".join(
-            f"- **{k}**: {v}"
-            for k, v in (self.context.tech_stack or {}).items()
-        ) if self.context.tech_stack else "- Stack not identified"
-        
-        return f"""### About the Project
-
-This project follows a **{self.context.architecture_pattern}** architecture, 
-implemented primarily in **{self.context.main_language}**.
-
-### Detected Patterns
-
-{patterns_list}
-
-### Technology Stack
-
-{tech_list}
-"""
-
-    def _generate_file_structure_rules(self) -> str:
-        """Generate file structure rules based on architecture."""
-        arch = self.context.architecture_pattern.lower()
-        
-        if "clean" in arch:
-            return self._clean_architecture_rules()
-        elif "mvc" in arch:
-            return self._mvc_rules()
-        elif "hexagonal" in arch or "ports" in arch:
-            return self._hexagonal_rules()
-        elif "microservice" in arch:
-            return self._microservices_rules()
-        elif "monolith" in arch:
-            return self._monolith_rules()
-        else:
-            return self._generic_structure_rules()
-    
-    def _clean_architecture_rules(self) -> str:
-        return """### Clean Architecture
-
-This project follows Clean Architecture. Respect the layers:
-
-```
-┌─────────────────────────────────────────────┐
-│              Frameworks & Drivers            │
-│  (Controllers, Routes, DB, External APIs)    │
-├─────────────────────────────────────────────┤
-│              Interface Adapters              │
-│    (Presenters, Gateways, Repositories)      │
-├─────────────────────────────────────────────┤
-│              Application Business            │
-│         (Use Cases, Services)                │
-├─────────────────────────────────────────────┤
-│              Enterprise Business             │
-│         (Entities, Domain Logic)             │
-└─────────────────────────────────────────────┘
-```
-
-**Rules:**
-1. Dependencies only point INWARD (to inner layers)
-2. Outer layers are NOT known by inner layers
-3. Use Cases orchestrate, Entities contain business logic
-4. Interfaces/Contracts belong in inner layers
-"""
-
-    def _mvc_rules(self) -> str:
-        return """### MVC (Model-View-Controller)
-
-```
-Models/      ─► Data logic and validation
-Views/       ─► Presentation only
-Controllers/ ─► Flow orchestration
-```
-
-**Rules:**
-1. Controllers should not have business logic
-2. Models should not know Views
-3. Views are passive (only display data)
-"""
-
-    def _hexagonal_rules(self) -> str:
-        return """### Hexagonal (Ports & Adapters)
-
-```
-adapters/
-├── inbound/   ─► HTTP, CLI, Events (input)
-└── outbound/  ─► Database, APIs (output)
-
-domain/        ─► Business logic (core)
-
-ports/
-├── inbound/   ─► Interfaces for use cases
-└── outbound/  ─► Interfaces for external services
-```
-
-**Rules:**
-1. Domain NEVER imports code from adapters
-2. Adapters implement Ports
-3. All external communication goes through Ports
-"""
-
-    def _microservices_rules(self) -> str:
-        return """### Microservices
-
-Each service is independent:
-
-```
-services/
-├── service-a/
-│   ├── src/
-│   ├── Dockerfile
-│   └── README.md
-└── service-b/
-    └── ...
-```
-
-**Rules:**
-1. Services communicate via APIs/Events
-2. Each service has its own database
-3. Don't share code between services (copy or extract to lib)
-"""
-
-    def _monolith_rules(self) -> str:
-        return """### Modular Monolith
-
-```
-src/
-├── modules/
-│   ├── module-a/
-│   └── module-b/
-├── shared/        ─► Shared code
-└── infrastructure/
-```
-
-**Rules:**
-1. Modules should be as independent as possible
-2. Inter-module communication via public interfaces
-3. Shared contains only generic utilities
-"""
-
-    def _generic_structure_rules(self) -> str:
-        return """### Project Structure
-
-Follow the existing folder organization. Before creating new files:
-
-1. Check where similar files are located
-2. Maintain consistency with existing patterns
-3. Check `/docs/context/COMPONENTS.md` for the complete catalog
-"""
-
-    def _generate_code_pattern_rules(self) -> str:
-        """Generate code pattern rules."""
-        patterns_text = ""
-        
-        for p in self.context.patterns_detected[:5]:
-            name = p.get("name", "Unknown")
-            desc = p.get("description", "")
-            evidence = p.get("evidence", [])[:2]
-            
-            patterns_text += f"""### {name}
-
-{desc}
-
-**Usage example:** See files:
-{chr(10).join(f'- `{e}`' for e in evidence) if evidence else '- Check documentation'}
-
----
-
-"""
-        
-        if not patterns_text:
-            patterns_text = """### General Patterns
-
-Follow existing patterns in the code. Before implementing:
-
-1. Look for similar implementations in the codebase
-2. Maintain consistency with existing style
-3. Check `/docs/context/PATTERNS.md`
-"""
-        
-        return patterns_text
-
-    def _generate_naming_conventions(self) -> str:
-        """Generate naming conventions based on language."""
-        lang = self.context.main_language.lower()
-        
-        if lang in ["python", "py"]:
-            return """### Python
-
-```python
-# Files and modules: snake_case
-my_module.py
-my_service.py
-
-# Classes: PascalCase
-class MyService:
-    pass
-
-# Functions and variables: snake_case
-def my_function():
-    my_variable = 1
-
-# Constants: UPPER_SNAKE_CASE
-MAX_RETRIES = 3
-
-# Private: prefix _
-def _internal_method():
-    pass
-```
-"""
-        elif lang in ["typescript", "javascript", "ts", "js"]:
-            return """### TypeScript/JavaScript
-
-```typescript
-// Files: kebab-case or PascalCase for components
-my-service.ts
-MyComponent.tsx
-
-// Classes and Components: PascalCase
-class MyService {}
-function MyComponent() {}
-
-// Functions and variables: camelCase
-function myFunction() {}
-const myVariable = 1;
-
-// Constants: UPPER_SNAKE_CASE
-const MAX_RETRIES = 3;
-
-// Interfaces: PascalCase, optional I prefix
-interface UserData {}
-interface IUserService {}
-
-// Types: PascalCase
-type UserRole = 'admin' | 'user';
-```
-"""
-        elif lang in ["java", "kotlin"]:
-            return """### Java/Kotlin
-
-```java
-// Files: PascalCase (same as class name)
-MyService.java
-
-// Classes: PascalCase
-class MyService {}
-
-// Methods and variables: camelCase
-public void myMethod() {}
-private int myVariable;
-
-// Constants: UPPER_SNAKE_CASE
-public static final int MAX_RETRIES = 3;
-
-// Packages: lowercase
-package com.example.myapp;
-```
-"""
-        else:
-            return """### General Conventions
-
-Follow the conventions of the project's main language.
-Check existing files for examples.
-"""
-
-    def _generate_import_rules(self) -> str:
-        """Generate import rules."""
-        lang = self.context.main_language.lower()
-        
-        base_rules = """### Import Order
-
-1. **Standard libraries** (built-in)
-2. **External dependencies** (third-party)
-3. **Internal imports** (from project)
-
-"""
-        
-        if lang in ["python", "py"]:
-            base_rules += """### Python
-
-```python
-# 1. Standard library
-import os
-from pathlib import Path
-
-# 2. Third-party
-from fastapi import FastAPI
-import numpy as np
-
-# 3. Internal
-from .my_module import my_function
-from src.services import MyService
-```
-"""
-        elif lang in ["typescript", "javascript", "ts", "js"]:
-            base_rules += """### TypeScript/JavaScript
-
-```typescript
-// 1. Node/Built-in
-import path from 'path';
-
-// 2. Third-party
-import express from 'express';
-import { z } from 'zod';
-
-// 3. Internal - aliases (@/)
-import { MyService } from '@/services/my-service';
-
-// 4. Internal - relative
-import { helper } from './utils';
-```
-"""
-        
-        return base_rules
-
-    def _generate_useful_commands(self) -> str:
-        """Generate useful commands section."""
-        lang = self.context.main_language.lower()
-        
-        if lang in ["python", "py"]:
-            return """```bash
-# Install dependencies
-pip install -r requirements.txt
-# or
-poetry install
-# or  
-pdm install
-
-# Run tests
-pytest
-pytest -v  # verbose
-
-# Type checking (if using mypy/pyright)
-mypy src/
-
-# Format code
-black src/
-isort src/
-
-# Lint
-ruff check src/
-flake8 src/
-```
-"""
-        elif lang in ["typescript", "javascript", "ts", "js"]:
-            return """```bash
-# Install dependencies
-npm install
-# or
-yarn
-# or
-pnpm install
-
-# Run development
-npm run dev
-
-# Build
-npm run build
-
-# Tests
-npm run test
-
-# Lint
-npm run lint
-
-# Format
-npm run format
-```
-"""
-        else:
-            return """Check README.md for project-specific commands.
-"""
-
-    def _generate_anti_patterns(self) -> str:
-        """Generate anti-patterns section."""
-        return """### Avoid These Mistakes
-
-1. **Don't duplicate code**
-   - Before creating something new, check if it already exists
-   - Check `/docs/context/COMPONENTS.md`
-
-2. **Don't ignore architecture**
-   - Respect layers and responsibilities
-   - Don't create circular dependencies
-
-3. **Don't hardcode values**
-   - Use configurations and constants
-   - Sensitive data goes in environment variables
-
-4. **Don't make giant commits**
-   - Small and focused commits
-   - One feature per commit
-
-5. **Don't ignore types**
-   - If the project uses TypeScript/types, maintain typing
-   - Avoid `any` or overly generic types
-
-6. **Don't modify configuration files unnecessarily**
-   - `package.json`, `pyproject.toml`, etc.
-   - Only when strictly necessary
-"""
-
-    def _generate_key_modules_section(self) -> str:
-        """Generate key modules section."""
-        if not self.context.key_modules:
-            return "Check `/docs/charts/04_COMPONENT_DIAGRAM.md` for module hierarchy."
-        
-        modules_text = "| Module | Description |\n|--------|-------------|"
-        for module in self.context.key_modules[:10]:
-            if isinstance(module, dict):
-                name = module.get("name", "Unknown")
-                desc = module.get("description", "N/A")
-            else:
-                name = str(module)
-                desc = "N/A"
-            modules_text += f"\n| `{name}` | {desc} |"
-        
-        return modules_text
-
-    def _generate_entry_points_section(self) -> str:
-        """Generate entry points section."""
-        if not self.context.entry_points:
-            return "Check `/docs/charts/05_DATA_FLOW.md` for entry points."
-        
-        return "\n".join(f"- `{ep}`" for ep in self.context.entry_points[:10])
-
+# ─── Legacy convenience function ────────────────────────────────
 
 def generate_agent_guidelines(
     project_name: str,
@@ -632,19 +82,9 @@ def generate_agent_guidelines(
 ) -> str:
     """
     Convenience function to generate agent guidelines.
-    
-    Args:
-        project_name: Name of the project
-        architecture_pattern: Detected architecture pattern
-        main_language: Main programming language
-        framework: Framework used (optional)
-        patterns_detected: List of detected patterns
-        tech_stack: Technology stack dictionary
-        entry_points: List of entry point files
-        key_modules: List of key modules
-        
+
     Returns:
-        Complete agent guidelines as markdown string
+        Complete agent guidelines as markdown string.
     """
     context = ProjectContext(
         project_name=project_name,
@@ -656,6 +96,6 @@ def generate_agent_guidelines(
         entry_points=entry_points or [],
         key_modules=key_modules or [],
     )
-    
+
     generator = AgentGuidelinesGenerator(context)
     return generator.generate_full_guidelines()

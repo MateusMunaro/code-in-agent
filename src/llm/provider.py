@@ -96,31 +96,12 @@ class OllamaProvider(LLMProvider):
 
 # Model to provider mapping
 MODEL_PROVIDERS = {
-    # OpenAI
-    "gpt-4o": "openai",
-    "gpt-4o-mini": "openai",
-    "gpt-4-turbo": "openai",
-    "gpt-3.5-turbo": "openai",
-    
-    # Anthropic
-    "claude-3-5-sonnet-20241022": "anthropic",
-    "claude-3-opus-20240229": "anthropic",
-    "claude-3-haiku-20240307": "anthropic",
-    
-    # Google
+    # Google Gemini
+    "gemini-2.5-flash": "google",
+    "gemini-2.5-pro": "google",
     "gemini-2.0-flash": "google",
-    "gemini-1.5-pro": "google",
-    "gemini-1.5-flash": "google",
-    
-    # Ollama (local)
-    "llama3.2": "ollama",
-    "llama3.1": "ollama",
-    "codellama": "ollama",
-    "deepseek-coder-v2": "ollama",
-    "qwen2.5-coder": "ollama",
-    "mistral": "ollama",
-    "mixtral": "ollama",
-    "phi3": "ollama",
+    "gemini-3-flash": "google",
+    "gemini-3-pro": "google",
 }
 
 # Provider instances
@@ -188,12 +169,13 @@ def list_available_models() -> list[str]:
 
 def get_default_model() -> str:
     """Get the default model based on what's available."""
-    # Priority order
+    # Priority order - Gemini only
     priority = [
-        "gpt-4o-mini",      # Fast and cheap
-        "claude-3-haiku-20240307",  # Fast Anthropic
-        "gemini-1.5-flash",  # Fast Google
-        "llama3.2",          # Local fallback
+        "gemini-2.5-flash",    # Fast and capable
+        "gemini-2.0-flash",    # Fallback flash
+        "gemini-2.5-pro",      # Pro fallback
+        "gemini-3-flash",      # Latest gen
+        "gemini-3-pro",        # Most powerful
     ]
     
     available = list_available_models()
@@ -202,8 +184,8 @@ def get_default_model() -> str:
         if model in available:
             return model
     
-    # If nothing else, return llama3.2 (Ollama)
-    return "llama3.2"
+    # Default fallback
+    return "gemini-2.5-flash"
 
 
 class MultiModelChat:

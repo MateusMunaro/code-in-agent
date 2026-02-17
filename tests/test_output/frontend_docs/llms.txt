@@ -1,0 +1,43 @@
+# frontend
+
+> llms.txt — Machine-readable documentation index
+> Generated: 2026-02-16
+
+## Project Summary
+
+- Architecture: Next.js App Router + React Components
+- Language: TypeScript + Next.js
+- Type: application
+- Files: 15 | Functions: 24 | Classes: 0
+- Stack: runtime: Node.js, framework: Next.js 14+, language: TypeScript, ui: React, styling: Tailwind CSS
+
+## Documentation Map
+
+| Artifact | Path | Purpose |
+|----------|------|---------|
+| Behavioral Contract | [AGENTS.md](AGENTS.md) | Rules, commands, boundaries for AI agents |
+| Repository Map | [repomap.txt](repomap.txt) | AST-compressed symbol map of entire repo |
+| Module Doc | [src\app/ReadMe.LLM](src\app/ReadMe.LLM) | Signatures + I/O for `src\app/` |
+| Module Rules | [src\app/AGENTS.md](src\app/AGENTS.md) | Module-specific overrides |
+| Module Doc | [src\components/ReadMe.LLM](src\components/ReadMe.LLM) | Signatures + I/O for `src\components/` |
+| Module Rules | [src\components/AGENTS.md](src\components/AGENTS.md) | Module-specific overrides |
+| Module Doc | [src\lib/ReadMe.LLM](src\lib/ReadMe.LLM) | Signatures + I/O for `src\lib/` |
+| Module Rules | [src\lib/AGENTS.md](src\lib/AGENTS.md) | Module-specific overrides |
+| SCIP Index | [_codein/scip_index.scip](_codein/scip_index.scip) | Compiler-precision symbol navigation |
+| TreeFrag | [_codein/treefrag.txt](_codein/treefrag.txt) | Hierarchical LOD representation |
+| Knowledge Graph | [_codein/knowledge_graph.json](_codein/knowledge_graph.json) | Enriched dependency graph |
+
+## Key Modules
+
+- `src\components/`
+- `src\app/`
+- `src\lib/`
+
+## Quick Reference
+
+### Entry Points
+- `src\app\layout.tsx`
+- `src\app\page.tsx`
+- `src\components\index.ts`
+- `src\app\jobs\page.tsx`
+- `src\app\jobs\[id]\page.tsx`

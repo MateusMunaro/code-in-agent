@@ -1,28 +1,40 @@
 """
-Documentation Generator.
+Multi-Layer Documentation Generator.
 
-Orchestrates the generation of complete, structured documentation
-for an analyzed codebase.
+Orchestrates the generation of a stratified documentation system
+designed for maximum AI agent performance:
+
+Root Level   → llms.txt, AGENTS.md, repomap.txt
+Module Level → {module}/ReadMe.LLM, {module}/AGENTS.md
+Semantic     → _codein/ (SCIP, TreeFrag, Knowledge Graph) — Phase 3
+
+This replaces the previous flat docs/ structure with a multi-layer,
+polyglot (human/machine) output.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
-from .doc_structure import (
-    DocumentationStructure,
-    DocCategory,
-    DocTemplate,
-    FOLDER_STRUCTURE,
+from .root_level import (
+    LlmsTxtGenerator,
+    AgentsMdGenerator,
+    RepomapGenerator,
+    ProjectProfile,
 )
-from .agent_guidelines import generate_agent_guidelines
+from .module_level import ReadmeLlmGenerator, NestedAgentsMdGenerator
+from .mermaid_generator import MermaidGenerator, MermaidContext
 
+
+# ═══════════════════════════════════════════════════════════════
+#  AnalysisResult (unchanged contract with the agent graph)
+# ═══════════════════════════════════════════════════════════════
 
 @dataclass
 class AnalysisResult:
-    """Results from codebase analysis."""
+    """Results from codebase analysis — bridge between agent graph and doc generators."""
     project_name: str
     architecture_pattern: str
     confidence: float
@@ -36,207 +48,114 @@ class AnalysisResult:
     improvements: list
     entry_points: list
     key_modules: list
+    # Rich AST data for data-driven documentation
+    file_tree: list = None
+    code_chunks: list = None
+    config_files_content: dict = None
 
 
-class DocumentationGenerator:
+# ═══════════════════════════════════════════════════════════════
+#  MultiLayerDocGenerator
+# ═══════════════════════════════════════════════════════════════
+
+class MultiLayerDocGenerator:
     """
-    Generates complete structured documentation from analysis results.
-    
-    Creates a full docs/ folder structure with:
-    - Visual diagrams (Mermaid)
-    - Context documentation
-    - Usage guides
-    - Agent rules
+    Generates the complete multi-layer documentation output.
+
+    Output hierarchy:
+        llms.txt                   — navigational index
+        AGENTS.md                  — behavioral contract (root)
+        repomap.txt                — AST-compressed repo map
+        {module}/ReadMe.LLM        — per-module signatures + I/O
+        {module}/AGENTS.md         — per-module rule overrides
+        _codein/*                  — semantic layer (Phase 3)
     """
-    
+
+    # Directories to skip when discovering modules
+    SKIP_DIRS = frozenset({
+        "node_modules", "__pycache__", ".git", "venv", "dist",
+        "build", ".next", ".cache", ".tox", "coverage",
+        "htmlcov", ".mypy_cache", ".pytest_cache", "egg-info",
+    })
+
+    # Minimum files in a directory to qualify as a module
+    MIN_MODULE_FILES = 1
+
     def __init__(self, analysis: AnalysisResult):
         self.analysis = analysis
         self.date = datetime.now().strftime("%B %d, %Y")
-        self.doc_structure = DocumentationStructure(
-            project_name=analysis.project_name,
-            architecture_pattern=analysis.architecture_pattern,
-            tech_stack=analysis.tech_stack,
-            patterns_detected=analysis.patterns_detected,
-        )
-    
+        self.profile = self._detect_project_profile()
+        self._module_map: dict[str, list[dict]] = {}
+        self._test_map: dict[str, list[dict]] = {}
+        self._build_module_maps()
+
+        # Log initialization
+        print(f"[MultiLayerDocGen] 📊 Initialized for: {analysis.project_name}")
+        print(f"[MultiLayerDocGen]    file_tree: {len(analysis.file_tree or [])} files")
+        print(f"[MultiLayerDocGen]    modules discovered: {len(self._module_map)}")
+        print(f"[MultiLayerDocGen]    dep_graph nodes: {len(analysis.dependency_graph.get('nodes', []))}")
+        print(f"[MultiLayerDocGen]    dep_graph edges: {len(analysis.dependency_graph.get('edges', []))}")
+        print(f"[MultiLayerDocGen]    profile: {self.profile}")
+
+    # =========================================
+    # PUBLIC API
+    # =========================================
+
     def generate_full_documentation(self) -> dict[str, str]:
         """
-        Generate all documentation files.
-        
+        Generate all documentation files for the new multi-layer architecture.
+
         Returns:
-            Dictionary mapping file paths to content
+            Dictionary mapping file paths to content.
+            Keys use repository-relative paths (no leading slash).
         """
-        docs = {}
-        
-        # 1. Generate folder structure overview
-        docs["docs/STRUCTURE.md"] = self._generate_structure_overview()
-        
-        # 2. Generate Agent Rules (root level)
-        docs["docs/AGENT_RULES.md"] = self._generate_agent_rules()
-        
-        # 3. Generate Charts documentation
-        docs.update(self._generate_charts_docs())
-        
-        # 4. Generate Context documentation  
-        docs.update(self._generate_context_docs())
-        
-        # 5. Generate Usage guides
-        docs.update(self._generate_usage_docs())
-        
+        docs: dict[str, str] = {}
+
+        # ---- Root Level ----
+        docs.update(self._generate_root_level())
+
+        # ---- Module Level ----
+        docs.update(self._generate_module_level())
+
+        # ---- Semantic Layer (Phase 3 placeholder) ----
+        # Will be populated by scip_service, treefrag_service, knowledge_graph_service
+
+        print(f"[MultiLayerDocGen] ✅ Generated {len(docs)} documentation files")
         return docs
-    
+
     def generate_summary_documentation(self) -> str:
         """
-        Generate a single comprehensive documentation file.
-        
-        Use this when you want all documentation in one file
-        instead of the full folder structure.
+        Generate a single combined documentation string.
+        Used for backward-compatible storage in analysis_results.
         """
-        return f"""# 📚 Project Documentation - {self.analysis.project_name}
+        docs = self.generate_full_documentation()
+        return self._create_summary_from_docs(docs)
 
-> Documentation automatically generated by Code Analysis Agent.
-> Analysis performed on {self.date}
+    # =========================================
+    # ROOT LEVEL GENERATION
+    # =========================================
 
----
+    def _generate_root_level(self) -> dict[str, str]:
+        """Generate llms.txt, AGENTS.md, repomap.txt."""
+        docs: dict[str, str] = {}
+        module_paths = sorted(self._module_map.keys())
 
-## 📋 Index
+        # llms.txt
+        llms_gen = LlmsTxtGenerator(
+            project_name=self.analysis.project_name,
+            architecture_pattern=self.analysis.architecture_pattern,
+            main_language=self.analysis.main_language,
+            framework=self.analysis.framework,
+            tech_stack=self.analysis.tech_stack,
+            entry_points=self.analysis.entry_points,
+            key_modules=self.analysis.key_modules,
+            module_paths=module_paths,
+            profile=self.profile,
+        )
+        docs["llms.txt"] = llms_gen.generate()
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Project Structure](#project-structure)
-4. [Detected Patterns](#detected-patterns)
-5. [Technology Stack](#technology-stack)
-6. [Rules for AI Agents](#rules-for-ai-agents)
-7. [Improvement Recommendations](#improvement-recommendations)
-8. [Recommended Documentation Structure](#recommended-documentation-structure)
-
----
-
-## Overview
-
-**Project:** {self.analysis.project_name}  
-**Architecture:** {self.analysis.architecture_pattern}  
-**Analysis Confidence:** {self.analysis.confidence:.0%}  
-**Main Language:** {self.analysis.main_language}  
-{f"**Framework:** {self.analysis.framework}" if self.analysis.framework else ""}
-
-### Statistics
-
-- **Files analyzed:** {len(self.analysis.files_read)}
-- **Patterns detected:** {len(self.analysis.patterns_detected)}
-- **Recommendations:** {len(self.analysis.improvements)}
-
----
-
-## Architecture
-
-### Architectural Pattern: {self.analysis.architecture_pattern}
-
-{self._generate_architecture_description()}
-
-### Architecture Diagram
-
-```mermaid
-{self._generate_architecture_mermaid()}
-```
-
----
-
-## Project Structure
-
-```
-{self.analysis.directory_structure}
-```
-
-### Key Modules
-
-{self._generate_key_modules_description()}
-
-### Entry Points
-
-{self._generate_entry_points_description()}
-
----
-
-## Detected Patterns
-
-{self._generate_patterns_section()}
-
----
-
-## Technology Stack
-
-{self._generate_tech_stack_section()}
-
----
-
-## Rules for AI Agents
-
-{self._generate_agent_rules()}
-
----
-
-## Improvement Recommendations
-
-{self._generate_improvements_section()}
-
----
-
-## Recommended Documentation Structure
-
-For a well-documented project, we recommend creating the following structure:
-
-```
-{FOLDER_STRUCTURE}
-```
-
-### Why This Structure?
-
-1. **`charts/`** - Visual diagrams (Mermaid) for quick understanding
-2. **`context/`** - Reference documentation for consultation
-3. **`usage/`** - Practical guides for common tasks
-4. **`implementations/`** - History of decisions and implementations
-5. **`AGENT_RULES.md`** - Specific rules for AI agents
-
-### Benefits
-
-- ✅ AI agents find context quickly
-- ✅ New developers orient themselves easily
-- ✅ Modular and scalable documentation
-- ✅ Decision trees guide to the right document
-
----
-
-*Generated by Code Analysis Agent on {self.date}*
-"""
-
-    def _generate_structure_overview(self) -> str:
-        """Generate documentation structure overview."""
-        return f"""# 📁 Documentation Structure - {self.analysis.project_name}
-
-> This file explains the documentation organization.
-
-## Folder Structure
-
-```
-{FOLDER_STRUCTURE}
-```
-
-## How to Navigate
-
-1. **Starting?** → Read `AGENT_RULES.md` first
-2. **Writing code?** → Go to `usage/00_INDEX.md`
-3. **Understanding the system?** → Go to `charts/00_INDEX.md`
-4. **Looking up reference?** → Search in `context/`
-
----
-
-*Generated by Code Analysis Agent on {self.date}*
-"""
-
-    def _generate_agent_rules(self) -> str:
-        """Generate agent rules using the generator."""
-        return generate_agent_guidelines(
+        # AGENTS.md (root)
+        agents_gen = AgentsMdGenerator(
             project_name=self.analysis.project_name,
             architecture_pattern=self.analysis.architecture_pattern,
             main_language=self.analysis.main_language,
@@ -245,1179 +164,342 @@ For a well-documented project, we recommend creating the following structure:
             tech_stack=self.analysis.tech_stack,
             entry_points=self.analysis.entry_points,
             key_modules=self.analysis.key_modules,
+            profile=self.profile,
+            module_paths=module_paths,
         )
+        docs["AGENTS.md"] = agents_gen.generate()
 
-    def _generate_charts_docs(self) -> dict[str, str]:
-        """Generate charts documentation."""
-        docs = {}
-        
-        # Index
-        docs["docs/charts/00_INDEX.md"] = self._generate_charts_index()
-        
-        # Architecture Overview
-        docs["docs/charts/01_ARCHITECTURE_OVERVIEW.md"] = self._generate_architecture_overview()
-        
-        # Class/Entity Diagram
-        docs["docs/charts/02_CLASS_DIAGRAM.md"] = self._generate_class_diagram()
-        
-        # Sequence Flows
-        docs["docs/charts/03_SEQUENCE_FLOWS.md"] = self._generate_sequence_flows()
-        
-        # Component Diagram
-        docs["docs/charts/04_COMPONENT_DIAGRAM.md"] = self._generate_component_diagram()
-        
-        # Data Flow
-        docs["docs/charts/05_DATA_FLOW.md"] = self._generate_data_flow_diagram()
-        
-        # Dependency Graph
-        docs["docs/charts/06_DEPENDENCY_GRAPH.md"] = self._generate_dependency_graph_doc()
-        
-        return docs
+        # repomap.txt
+        repomap_gen = RepomapGenerator(
+            project_name=self.analysis.project_name,
+            file_tree=self.analysis.file_tree,
+            dependency_graph=self.analysis.dependency_graph,
+            main_language=self.analysis.main_language,
+            profile=self.profile,
+        )
+        docs["repomap.txt"] = repomap_gen.generate()
 
-    def _generate_context_docs(self) -> dict[str, str]:
-        """Generate context documentation."""
-        docs = {}
-        
-        docs["docs/context/ARCHITECTURE.md"] = self._generate_architecture_context()
-        docs["docs/context/COMPONENTS.md"] = self._generate_components_catalog()
-        docs["docs/context/PATTERNS.md"] = self._generate_patterns_catalog()
-        docs["docs/context/TECH_STACK.md"] = self._generate_tech_stack_doc()
-        
-        return docs
-
-    def _generate_usage_docs(self) -> dict[str, str]:
-        """Generate usage guides."""
-        docs = {}
-        
-        docs["docs/usage/00_INDEX.md"] = self._generate_usage_index()
-        docs["docs/usage/01_GETTING_STARTED.md"] = self._generate_getting_started()
-        docs["docs/usage/02_CODE_PATTERNS.md"] = self._generate_code_patterns_guide()
-        docs["docs/usage/03_DATA_FLOW.md"] = self._generate_data_flow_guide()
-        docs["docs/usage/04_ADDING_FEATURES.md"] = self._generate_adding_features_guide()
-        
         return docs
 
     # =========================================
-    # HELPER METHODS FOR CONTENT GENERATION
+    # MODULE LEVEL GENERATION
     # =========================================
 
-    def _generate_charts_index(self) -> str:
-        """Generate charts index."""
-        return f"""# 📊 Visual Documentation - {self.analysis.project_name}
-
-> Diagrams and visual documentation for global project context.
-
-## 📁 Document Structure
-
-| # | Document | Description |
-|---|----------|-------------|
-| 01 | [System Architecture](./01_ARCHITECTURE_OVERVIEW.md) | Architecture overview and structure |
-| 02 | [Class Diagram](./02_CLASS_DIAGRAM.md) | Domain model and entities |
-| 03 | [Flows and Sequences](./03_SEQUENCE_FLOWS.md) | Main operation flows |
-| 04 | [Components](./04_COMPONENT_DIAGRAM.md) | Module hierarchy |
-| 05 | [Data Flow](./05_DATA_FLOW.md) | How data flows |
-| 06 | [Dependencies](./06_DEPENDENCY_GRAPH.md) | Dependency graph |
-
----
-
-## 🎯 How to Use
-
-### For New Developers
-1. Start with [01_ARCHITECTURE_OVERVIEW](./01_ARCHITECTURE_OVERVIEW.md)
-2. Read [02_CLASS_DIAGRAM](./02_CLASS_DIAGRAM.md) to understand entities
-3. Explore [04_COMPONENT_DIAGRAM](./04_COMPONENT_DIAGRAM.md) to understand structure
-
-### For Implementing Features
-1. Check [04_COMPONENT_DIAGRAM](./04_COMPONENT_DIAGRAM.md) for patterns
-2. See [05_DATA_FLOW](./05_DATA_FLOW.md) to understand flow
-3. Use [03_SEQUENCE_FLOWS](./03_SEQUENCE_FLOWS.md) as reference
-
----
-
-## 🏗️ Quick Overview
-
-### Architecture: {self.analysis.architecture_pattern}
-
-**Confidence:** {self.analysis.confidence:.0%}
-
-### Main Stack
-```
-{self._format_tech_stack_summary()}
-```
-
----
-
-*Last updated: {self.date}*
-"""
-
-    def _generate_architecture_overview(self) -> str:
-        """Generate architecture overview with diagrams."""
-        return f"""# System Architecture - {self.analysis.project_name}
-
-## Architecture Overview
-
-**Pattern:** {self.analysis.architecture_pattern}
-
-```mermaid
-{self._generate_architecture_mermaid()}
-```
-
-## Application Layers
-
-```mermaid
-{self._generate_layers_mermaid()}
-```
-
-## Technology Stack
-
-| Layer | Technology | Purpose |
-|-------|------------|---------|
-{self._format_tech_stack_table()}
-
-## Directory Structure
-
-```
-{self.analysis.directory_structure}
-```
-
----
-
-*Generated by Code Analysis Agent on {self.date}*
-"""
-
-    def _generate_class_diagram(self) -> str:
-        """Generate class diagram documentation."""
-        return f"""# Class Diagram - {self.analysis.project_name}
-
-## Domain Model
-
-```mermaid
-{self._generate_class_mermaid()}
-```
-
-## Entity Descriptions
-
-{self._generate_entities_description()}
-
----
-
-*Generated by Code Analysis Agent on {self.date}*
-"""
-
-    def _generate_sequence_flows(self) -> str:
-        """Generate sequence diagrams."""
-        return f"""# Flows and Sequences - {self.analysis.project_name}
-
-## Main Flows
-
-{self._generate_main_flows_description()}
-
-## Sequence Diagrams
-
-```mermaid
-{self._generate_sequence_mermaid()}
-```
-
----
-
-*Generated by Code Analysis Agent on {self.date}*
-"""
-
-    def _generate_component_diagram(self) -> str:
-        """Generate component diagram."""
-        return f"""# Component Diagram - {self.analysis.project_name}
-
-## Component Hierarchy
-
-```mermaid
-{self._generate_component_mermaid()}
-```
-
-## Main Components
-
-{self._generate_components_list()}
-
----
-
-*Generated by Code Analysis Agent on {self.date}*
-"""
-
-    def _generate_data_flow_diagram(self) -> str:
-        """Generate data flow diagram."""
-        return f"""# Data Flow - {self.analysis.project_name}
-
-## Flow Diagram
-
-```mermaid
-{self._generate_data_flow_mermaid()}
-```
-
-## Flow Description
-
-{self._generate_flow_description()}
-
----
-
-*Generated by Code Analysis Agent on {self.date}*
-"""
-
-    def _generate_dependency_graph_doc(self) -> str:
-        """Generate dependency graph documentation."""
-        stats = self.analysis.dependency_graph.get("stats", {})
-        
-        return f"""# Dependency Graph - {self.analysis.project_name}
-
-## Statistics
-
-| Metric | Value |
-|--------|-------|
-| Total Files | {stats.get('file_count', 'N/A')} |
-| Total Functions | {stats.get('function_count', 'N/A')} |
-| Total Classes | {stats.get('class_count', 'N/A')} |
-
-## Overview
-
-```mermaid
-{self._generate_dependency_mermaid()}
-```
-
-## Most Connected Modules
-
-{self._generate_connected_modules_list()}
-
----
-
-*Generated by Code Analysis Agent on {self.date}*
-"""
-
-    def _generate_architecture_context(self) -> str:
-        """Generate architecture context document."""
-        return f"""# Architectural Context - {self.analysis.project_name}
-
-> Quick reference guide about the project architecture.
-
-**Architectural Pattern:** {self.analysis.architecture_pattern}  
-**Last Updated:** {self.date}
-
----
-
-## Architectural Decisions
-
-{self._generate_architecture_description()}
-
-## Patterns Used
-
-{self._generate_patterns_summary()}
-
-## Boundaries and Responsibilities
-
-{self._generate_layer_responsibilities()}
-
----
-
-*Generated by Code Analysis Agent*
-"""
-
-    def _generate_components_catalog(self) -> str:
-        """Generate components catalog."""
-        return f"""# Component Catalog - {self.analysis.project_name}
-
-> Documentation of system components/modules.
-
-**Last Updated:** {self.date}
-
----
-
-{self._generate_full_components_catalog()}
-
----
-
-*Generated by Code Analysis Agent*
-"""
-
-    def _generate_patterns_catalog(self) -> str:
-        """Generate patterns catalog."""
-        return f"""# Code Patterns - {self.analysis.project_name}
-
-> Catalog of design patterns and conventions used in the project.
-
----
-
-{self._generate_patterns_section()}
-
----
-
-*Generated by Code Analysis Agent*
-"""
-
-    def _generate_tech_stack_doc(self) -> str:
-        """Generate tech stack documentation."""
-        return f"""# Technology Stack - {self.analysis.project_name}
-
-> Documentation of project technologies and dependencies.
-
----
-
-## Main Stack
-
-{self._generate_tech_stack_section()}
-
----
-
-*Generated by Code Analysis Agent*
-"""
-
-    def _generate_usage_index(self) -> str:
-        """Generate usage index with decision tree."""
-        return f"""# Usage Index - {self.analysis.project_name}
-
-> Decision tree to navigate documentation. Start here.
-
----
-
-## Quick Decision Tree
-
-**What do you need to do?**
-```
-START HERE
-    │
-    ├─► Starting on the project?
-    │       │
-    │       └─► 01_GETTING_STARTED.md
-    │
-    ├─► Writing code?
-    │       │
-    │       ├─► New component/module ──────► 02_CODE_PATTERNS.md
-    │       └─► Understand data flow ──────► 03_DATA_FLOW.md
-    │
-    ├─► Adding features?
-    │       │
-    │       └─► 04_ADDING_FEATURES.md
-    │
-    └─► Understanding architecture?
-            │
-            └─► See `/charts/00_INDEX.md` for diagrams
-```
-
----
-
-## Guide Summary
-
-| # | Guide | When to Use |
-|---|-------|-------------|
-| 01 | GETTING_STARTED | First time on the project |
-| 02 | CODE_PATTERNS | Writing code following patterns |
-| 03 | DATA_FLOW | Understanding how data flows |
-| 04 | ADDING_FEATURES | Adding new features |
-
----
-
-## Rules for AI Agents
-
-1. **Read this INDEX first** - don't load all guides
-2. **Follow one path** - load only the guide matching the task
-3. **Reference docs on demand** - only when the guide points to them
-
----
-
-*Last updated: {self.date}*
-"""
-
-    def _generate_getting_started(self) -> str:
-        """Generate getting started guide."""
-        return f"""# Guide: Getting Started - {self.analysis.project_name}
-
-> Step by step to setup and understand the project.
-
----
-
-## Prerequisites
-
-{self._generate_prerequisites()}
-
-## Environment Setup
-
-{self._generate_setup_steps()}
-
-## First Steps
-
-1. Clone the repository
-2. Install dependencies
-3. Configure environment variables (if applicable)
-4. Run the project
-
-## Useful Commands
-
-{self._generate_commands()}
-
----
-
-*Back to [Index](./00_INDEX.md)*
-"""
-
-    def _generate_code_patterns_guide(self) -> str:
-        """Generate code patterns guide."""
-        return f"""# Guide: Code Patterns - {self.analysis.project_name}
-
-> How to write code following project patterns.
-
----
-
-## Required Documents
-
-Before creating code, check:
-
-| Document | Path | Why |
-|----------|------|-----|
-| PATTERNS | `context/PATTERNS.md` | Design patterns used |
-| COMPONENTS | `context/COMPONENTS.md` | Check if something similar already exists |
-
----
-
-## Project Patterns
-
-{self._generate_patterns_summary()}
-
-## Examples
-
-{self._generate_code_examples()}
-
----
-
-*Back to [Index](./00_INDEX.md)*
-"""
-
-    def _generate_data_flow_guide(self) -> str:
-        """Generate data flow guide."""
-        return f"""# Guide: Data Flow - {self.analysis.project_name}
-
-> How data flows through the system.
-
----
-
-## Overview
-
-{self._generate_flow_description()}
-
-## Entry Points
-
-{self._generate_entry_points_description()}
-
----
-
-*Back to [Index](./00_INDEX.md)*
-"""
-
-    def _generate_adding_features_guide(self) -> str:
-        """Generate adding features guide."""
-        return f"""# Guide: Adding Features - {self.analysis.project_name}
-
-> Step by step to add new features.
-
----
-
-## Before Starting
-
-1. Check if the feature already exists in `/docs/context/COMPONENTS.md`
-2. Understand architecture in `/docs/charts/01_ARCHITECTURE_OVERVIEW.md`
-3. Follow patterns in `/docs/context/PATTERNS.md`
-
-## Step by Step
-
-1. Identify which layer/module the feature belongs to
-2. Create files in the correct structure
-3. Follow naming conventions
-4. Add tests
-5. Update documentation if needed
-
-## Final Checklist
-
-- [ ] Code follows project patterns
-- [ ] Tests were added
-- [ ] Documentation updated
-- [ ] Code review done
-
----
-
-*Back to [Index](./00_INDEX.md)*
-"""
+    def _generate_module_level(self) -> dict[str, str]:
+        """Generate ReadMe.LLM and AGENTS.md for each discovered module."""
+        docs: dict[str, str] = {}
+
+        for mod_path, mod_files in sorted(self._module_map.items()):
+            # Find test files related to this module
+            test_files = self._find_tests_for_module(mod_path)
+
+            # ReadMe.LLM
+            readme_gen = ReadmeLlmGenerator(
+                module_path=mod_path,
+                module_files=mod_files,
+                test_files=test_files,
+                dependency_graph=self.analysis.dependency_graph,
+                main_language=self.analysis.main_language,
+                project_name=self.analysis.project_name,
+            )
+            docs[f"{mod_path}/ReadMe.LLM"] = readme_gen.generate()
+
+            # AGENTS.md (nested)
+            agents_gen = NestedAgentsMdGenerator(
+                module_path=mod_path,
+                module_files=mod_files,
+                main_language=self.analysis.main_language,
+                project_name=self.analysis.project_name,
+                architecture_pattern=self.analysis.architecture_pattern,
+            )
+            docs[f"{mod_path}/AGENTS.md"] = agents_gen.generate()
+
+        return docs
 
     # =========================================
-    # MERMAID DIAGRAM GENERATORS
+    # MODULE DISCOVERY
     # =========================================
 
-    def _generate_architecture_mermaid(self) -> str:
-        """Generate architecture Mermaid diagram."""
-        arch = self.analysis.architecture_pattern.lower()
-        
-        if "clean" in arch:
-            return """flowchart TB
-    subgraph External["🌐 External"]
-        UI[UI/API]
-        DB[(Database)]
-        ExtAPI[External APIs]
-    end
-    
-    subgraph Adapters["📦 Adapters"]
-        Controllers[Controllers]
-        Repositories[Repositories]
-        Gateways[Gateways]
-    end
-    
-    subgraph Application["⚙️ Application"]
-        UseCases[Use Cases]
-        Services[Services]
-    end
-    
-    subgraph Domain["💎 Domain"]
-        Entities[Entities]
-        ValueObjects[Value Objects]
-    end
-    
-    UI --> Controllers
-    Controllers --> UseCases
-    UseCases --> Entities
-    UseCases --> Repositories
-    Repositories --> DB
-    UseCases --> Gateways
-    Gateways --> ExtAPI"""
-        
-        elif "mvc" in arch:
-            return """flowchart LR
-    subgraph View["👁️ View"]
-        Templates[Templates]
-        Components[Components]
-    end
-    
-    subgraph Controller["🎮 Controller"]
-        Routes[Routes]
-        Handlers[Handlers]
-    end
-    
-    subgraph Model["📦 Model"]
-        Entities[Entities]
-        Repositories[Repositories]
-    end
-    
-    View <--> Controller
-    Controller <--> Model"""
-        
-        elif "hexagonal" in arch or "ports" in arch:
-            return """flowchart TB
-    subgraph Inbound["⬅️ Inbound Adapters"]
-        HTTP[HTTP API]
-        CLI[CLI]
-        Events[Event Listeners]
-    end
-    
-    subgraph Core["💎 Core Domain"]
-        subgraph Ports["Ports"]
-            InPorts[Inbound Ports]
-            OutPorts[Outbound Ports]
-        end
-        Domain[Domain Logic]
-    end
-    
-    subgraph Outbound["➡️ Outbound Adapters"]
-        DB[(Database)]
-        ExtAPI[External APIs]
-        Queue[Message Queue]
-    end
-    
-    HTTP --> InPorts
-    CLI --> InPorts
-    Events --> InPorts
-    InPorts --> Domain
-    Domain --> OutPorts
-    OutPorts --> DB
-    OutPorts --> ExtAPI
-    OutPorts --> Queue"""
-        
-        else:
-            return """flowchart TB
-    subgraph Presentation["🖥️ Presentation"]
-        UI[User Interface]
-        API[API Layer]
-    end
-    
-    subgraph Business["⚙️ Business Logic"]
-        Services[Services]
-        Logic[Core Logic]
-    end
-    
-    subgraph Data["🗄️ Data Layer"]
-        DB[(Database)]
-        Cache[Cache]
-    end
-    
-    UI --> Services
-    API --> Services
-    Services --> Logic
-    Logic --> DB
-    Logic --> Cache"""
+    def _build_module_maps(self):
+        """
+        Group file_tree entries by parent directory to discover modules.
+        Also builds a parallel map of test files.
+        """
+        file_tree = self.analysis.file_tree or []
 
-    def _generate_layers_mermaid(self) -> str:
-        """Generate layers diagram."""
-        return """flowchart LR
-    subgraph Presentation["Presentation Layer"]
-        P1[Pages/Views]
-        P2[Components]
-        P3[Controllers]
-    end
-    
-    subgraph Business["Business Layer"]
-        B1[Services]
-        B2[Use Cases]
-        B3[Utils]
-    end
-    
-    subgraph Data["Data Layer"]
-        D1[Repositories]
-        D2[APIs]
-        D3[Cache]
-    end
-    
-    Presentation --> Business
-    Business --> Data"""
+        for f in file_tree:
+            path = f.get("path", "")
+            if not path:
+                continue
 
-    def _generate_class_mermaid(self) -> str:
-        """Generate class diagram from actual code analysis."""
-        # Extract classes and their relationships from dependency graph
-        nodes = self.analysis.dependency_graph.get("nodes", [])
-        edges = self.analysis.dependency_graph.get("edges", [])
-        
-        classes = [n for n in nodes if n.get("type") == "class"]
-        
-        if not classes:
-            return """classDiagram
-    class Entity {
-        +id: string
-        +createdAt: datetime
-    }
-    
-    class Service {
-        +execute()
-    }
-    
-    Entity <-- Service : uses"""
-        
-        # Build class diagram from detected classes with real data
-        lines = ["classDiagram"]
-        class_ids = set()
-        
-        for cls in classes[:15]:  # Limit to 15 classes
-            name = cls.get("name", "Unknown")
-            metadata = cls.get("metadata", {})
-            methods = metadata.get("methods", [])
-            
-            # Sanitize class name for Mermaid
-            safe_name = name.replace("-", "_").replace(".", "_")
-            class_ids.add(cls.get("id", ""))
-            
-            lines.append(f"    class {safe_name} {{")
-            
-            # Add methods if available
-            for method in methods[:5]:  # Limit methods shown
-                lines.append(f"        +{method}()")
-            
-            lines.append("    }")
-        
-        # Add inheritance relationships (extends edges)
-        for edge in edges:
-            if edge.get("type") == "extends":
-                source_name = edge.get("source", "").split(":")[-1]
-                target_name = edge.get("target", "").split(":")[-1]
-                source_safe = source_name.replace("-", "_").replace(".", "_")
-                target_safe = target_name.replace("-", "_").replace(".", "_")
-                if source_safe and target_safe:
-                    lines.append(f"    {target_safe} <|-- {source_safe}")
-        
-        # Add implements relationships
-        for edge in edges:
-            if edge.get("type") == "implements":
-                source_name = edge.get("source", "").split(":")[-1]
-                target_name = edge.get("target", "").split(":")[-1]
-                source_safe = source_name.replace("-", "_").replace(".", "_")
-                target_safe = target_name.replace("-", "_").replace(".", "_")
-                if source_safe and target_safe:
-                    lines.append(f"    {target_safe} <|.. {source_safe} : implements")
-        
-        return "\n".join(lines)
+            parts = Path(path).parts
 
-    def _generate_sequence_mermaid(self) -> str:
-        """Generate sequence diagram."""
-        return """sequenceDiagram
-    participant User
-    participant Controller
-    participant Service
-    participant Repository
-    participant Database
-    
-    User->>Controller: Request
-    Controller->>Service: Process
-    Service->>Repository: Query
-    Repository->>Database: SQL
-    Database-->>Repository: Data
-    Repository-->>Service: Entity
-    Service-->>Controller: Result
-    Controller-->>User: Response"""
+            # Skip noise directories
+            if any(skip in parts for skip in self.SKIP_DIRS):
+                continue
 
-    def _generate_component_mermaid(self) -> str:
-        """Generate component diagram."""
-        modules = self.analysis.key_modules[:8] if self.analysis.key_modules else []
-        
-        if not modules:
-            return """flowchart TB
-    subgraph Core["Core"]
-        Main[Main Module]
-    end
-    
-    subgraph Features["Features"]
-        F1[Feature 1]
-        F2[Feature 2]
-    end
-    
-    Main --> F1
-    Main --> F2"""
-        
-        lines = ["flowchart TB"]
-        for i, module in enumerate(modules):
-            name = module if isinstance(module, str) else module.get("name", f"Module{i}")
-            clean_name = name.replace("/", "_").replace("-", "_").replace(".", "_")
-            lines.append(f"    {clean_name}[{name}]")
-        
-        return "\n".join(lines)
+            # Determine parent directory (1 or 2 levels)
+            if len(parts) <= 1:
+                # Root-level file — goes into a virtual "root" module only
+                # if we have enough root files
+                continue
 
-    def _generate_data_flow_mermaid(self) -> str:
-        """Generate data flow diagram."""
-        return """flowchart LR
-    subgraph Input["📥 Input"]
-        API[API Request]
-        Event[Event]
-    end
-    
-    subgraph Process["⚙️ Processing"]
-        Validate[Validation]
-        Transform[Transform]
-        Logic[Business Logic]
-    end
-    
-    subgraph Output["📤 Output"]
-        DB[(Database)]
-        Response[Response]
-    end
-    
-    API --> Validate
-    Event --> Validate
-    Validate --> Transform
-    Transform --> Logic
-    Logic --> DB
-    Logic --> Response"""
+            # Use the first 1-2 directory levels as module path
+            if len(parts) == 2:
+                mod_path = parts[0]
+            else:
+                # Use first two levels for deeper structures
+                mod_path = str(Path(parts[0]) / parts[1])
 
-    def _generate_dependency_mermaid(self) -> str:
-        """Generate dependency graph Mermaid from actual code relationships."""
-        edges = self.analysis.dependency_graph.get("edges", [])
-        nodes = self.analysis.dependency_graph.get("nodes", [])
-        
-        if not edges:
-            return """flowchart TB
-    A[Module A] --> B[Module B]
-    B --> C[Module C]"""
-        
-        lines = ["flowchart TB"]
-        seen_nodes = set()
-        
-        # Separate edges by type
-        import_edges = [e for e in edges if e.get("type") == "imports"][:15]
-        call_edges = [e for e in edges if e.get("type") == "calls"][:15]
-        
-        # Add subgraph for file imports
-        if import_edges:
-            lines.append("    subgraph Imports[File Dependencies]")
-            for edge in import_edges:
-                source = edge.get("source", "").replace("file:", "").split("/")[-1]
-                target = edge.get("target", "").replace("file:", "").split("/")[-1]
-                
-                if source and target and source != target:
-                    source_clean = source.replace(".", "_").replace("-", "_")[:20]
-                    target_clean = target.replace(".", "_").replace("-", "_")[:20]
-                    
-                    if source_clean not in seen_nodes:
-                        lines.append(f"        {source_clean}[{source[:15]}]")
-                        seen_nodes.add(source_clean)
-                    if target_clean not in seen_nodes:
-                        lines.append(f"        {target_clean}[{target[:15]}]")
-                        seen_nodes.add(target_clean)
-                    
-                    lines.append(f"        {source_clean} --> {target_clean}")
-            lines.append("    end")
-        
-        # Add subgraph for function calls
-        if call_edges:
-            lines.append("    subgraph Calls[Function Calls]")
-            call_nodes = set()
-            for edge in call_edges:
-                source = edge.get("source", "").split(":")[-1]
-                target = edge.get("target", "").split(":")[-1]
-                
-                if source and target and source != target:
-                    source_clean = f"fn_{source.replace('.', '_').replace('-', '_')[:15]}"
-                    target_clean = f"fn_{target.replace('.', '_').replace('-', '_')[:15]}"
-                    
-                    if source_clean not in call_nodes:
-                        lines.append(f"        {source_clean}({source[:12]})")
-                        call_nodes.add(source_clean)
-                    if target_clean not in call_nodes:
-                        lines.append(f"        {target_clean}({target[:12]})")
-                        call_nodes.add(target_clean)
-                    
-                    lines.append(f"        {source_clean} -.-> {target_clean}")
-            lines.append("    end")
-        
-        return "\n".join(lines) if len(lines) > 1 else """flowchart TB
-    A[Module A] --> B[Module B]"""
+            # Classify as test or source
+            path_lower = path.lower()
+            is_test = any(
+                kw in path_lower
+                for kw in ("test", "spec", "__tests__", "tests/")
+            )
 
-    # =========================================
-    # TEXT CONTENT GENERATORS
-    # =========================================
+            if is_test:
+                self._test_map.setdefault(mod_path, []).append(f)
+            else:
+                self._module_map.setdefault(mod_path, []).append(f)
 
-    def _generate_architecture_description(self) -> str:
-        """Generate architecture description."""
-        arch = self.analysis.architecture_pattern
-        
-        descriptions = {
-            "Clean Architecture": """
-This project follows **Clean Architecture**, separating code into concentric layers
-where dependencies only point inward (towards the domain).
-
-**Layers:**
-- **Entities/Domain**: Enterprise business rules
-- **Use Cases/Application**: Application business rules
-- **Interface Adapters**: Controllers, Gateways, Presenters
-- **Frameworks & Drivers**: Web, DB, external devices
-""",
-            "MVC": """
-This project follows the **MVC (Model-View-Controller)** pattern.
-
-**Components:**
-- **Model**: Data and business logic
-- **View**: User interface
-- **Controller**: Orchestrates Model and View
-""",
-            "Hexagonal": """
-This project follows **Hexagonal Architecture (Ports & Adapters)**.
-
-**Components:**
-- **Core Domain**: Business logic at the center
-- **Ports**: Interfaces for input and output
-- **Adapters**: Concrete implementations of ports
-""",
+        # Filter out modules with too few files
+        self._module_map = {
+            k: v for k, v in self._module_map.items()
+            if len(v) >= self.MIN_MODULE_FILES
         }
-        
-        for key, desc in descriptions.items():
-            if key.lower() in arch.lower():
-                return desc
-        
-        return f"""
-The project follows a **{arch}** architecture.
 
-Check diagrams at `/docs/charts/` for more details.
-"""
+    def _find_tests_for_module(self, module_path: str) -> list[dict]:
+        """
+        Find test files that correspond to a given module.
 
-    def _generate_patterns_section(self) -> str:
-        """Generate patterns section."""
-        if not self.analysis.patterns_detected:
-            return "No specific patterns detected with high confidence."
-        
-        sections = []
-        for p in self.analysis.patterns_detected:
-            name = p.get("name", "Unknown")
-            desc = p.get("description", "N/A")
-            confidence = p.get("confidence", 0.5)
-            evidence = p.get("evidence", [])
-            
-            section = f"""### {name}
+        Matches by:
+        1. Direct: tests in the same module path
+        2. Sibling: tests/ directory at the same level
+        3. Name: test files whose names reference the module
+        """
+        # Direct match
+        if module_path in self._test_map:
+            return self._test_map[module_path]
 
-**Confidence:** {confidence:.0%}
+        # Try common test directory patterns
+        parts = Path(module_path).parts
+        test_candidates = [
+            f"tests/{parts[-1]}" if len(parts) >= 1 else "",
+            f"{parts[0]}/tests" if len(parts) >= 1 else "",
+            f"test/{parts[-1]}" if len(parts) >= 1 else "",
+        ]
 
-{desc}
+        for candidate in test_candidates:
+            if candidate and candidate in self._test_map:
+                return self._test_map[candidate]
 
-**Evidence:**
-{chr(10).join(f'- `{e}`' for e in evidence[:3]) if evidence else '- Inferred from analysis'}
+        return []
 
----
-"""
-            sections.append(section)
-        
-        return "\n".join(sections)
+    # =========================================
+    # PROJECT PROFILE DETECTION
+    # =========================================
 
-    def _generate_patterns_summary(self) -> str:
-        """Generate brief patterns summary."""
-        if not self.analysis.patterns_detected:
-            return "- Follow existing patterns in the code"
-        
-        return "\n".join(
-            f"- **{p.get('name', 'Unknown')}**: {p.get('description', 'N/A')[:100]}"
-            for p in self.analysis.patterns_detected[:5]
+    def _detect_project_profile(self) -> ProjectProfile:
+        """Detect project characteristics to adapt documentation."""
+        lang = (self.analysis.main_language or "").lower()
+        file_tree = self.analysis.file_tree or []
+        config = self.analysis.config_files_content or {}
+
+        all_funcs = self._get_all_functions()
+        all_classes = self._get_all_classes()
+
+        profile = ProjectProfile(
+            has_classes=len(all_classes) > 0,
+            naming_convention=self._detect_naming_convention(all_funcs),
+            total_functions=len(all_funcs),
+            total_classes=len(all_classes),
+            total_files=len(file_tree),
         )
 
-    def _generate_tech_stack_section(self) -> str:
-        """Generate tech stack section."""
-        if not self.analysis.tech_stack:
-            return f"""**Main Language:** {self.analysis.main_language}
-{f"**Framework:** {self.analysis.framework}" if self.analysis.framework else ""}
+        # Detect build system from config files
+        config_names = [Path(k).name.lower() for k in config.keys()]
 
-Check `package.json`, `requirements.txt` or configuration files for details.
-"""
-        
-        return "\n".join(
-            f"| {k} | {v} |"
-            for k, v in self.analysis.tech_stack.items()
-        )
+        if any("makefile" in n for n in config_names):
+            profile.has_build_system = True
+            profile.build_tool = "Make"
+            for k, v in config.items():
+                if "makefile" in k.lower():
+                    profile.build_commands = self._extract_makefile_targets(v)
+                    break
+        elif any("cmakelists" in n for n in config_names):
+            profile.has_build_system = True
+            profile.build_tool = "CMake"
+        elif any("package.json" in n for n in config_names):
+            profile.has_build_system = True
+            profile.build_tool = "npm"
+            for k, v in config.items():
+                if "package.json" in k.lower():
+                    profile.build_commands = self._extract_npm_scripts(v)
+                    break
+        elif any("cargo.toml" in n for n in config_names):
+            profile.has_build_system = True
+            profile.build_tool = "Cargo"
+            profile.build_commands = {
+                "build": "cargo build",
+                "run": "cargo run",
+                "test": "cargo test",
+            }
+        elif any("go.mod" in n for n in config_names):
+            profile.has_build_system = True
+            profile.build_tool = "Go"
+            profile.build_commands = {
+                "build": "go build",
+                "run": "go run",
+                "test": "go test ./...",
+            }
+        elif any(
+            "pyproject.toml" in n or "requirements.txt" in n
+            for n in config_names
+        ):
+            profile.has_build_system = True
+            profile.build_tool = "pip/poetry"
 
-    def _format_tech_stack_summary(self) -> str:
-        """Format tech stack for quick view."""
-        stack = [self.analysis.main_language]
-        if self.analysis.framework:
-            stack.append(self.analysis.framework)
-        if self.analysis.tech_stack:
-            stack.extend(list(self.analysis.tech_stack.values())[:3])
-        return "\n".join(stack[:5])
+        # Detect test presence
+        for f in file_tree:
+            p = f.get("path", "").lower()
+            if "test" in p or "spec" in p or "_test." in p or "test_" in p:
+                profile.has_tests = True
+                break
 
-    def _format_tech_stack_table(self) -> str:
-        """Format tech stack as table."""
-        lines = []
-        
-        lines.append(f"| Language | {self.analysis.main_language} | Main language |")
-        
-        if self.analysis.framework:
-            lines.append(f"| Framework | {self.analysis.framework} | Main framework |")
-        
-        for k, v in (self.analysis.tech_stack or {}).items():
-            lines.append(f"| {k} | {v} | - |")
-        
-        return "\n".join(lines) if lines else "| - | - | - |"
+        # Detect project type
+        all_paths = " ".join(f.get("path", "").lower() for f in file_tree)
+        if any(x in all_paths for x in ("routes/", "views/", "handlers/", "api/", "server.", "app.")):
+            profile.is_web = True
+        if any(x in all_paths for x in ("cli.", "cmd/", "main.", "__main__.")):
+            profile.is_cli = True
+        if any(x in all_paths for x in ("lib/", "include/", "pkg/")):
+            profile.is_library = True
 
-    def _generate_improvements_section(self) -> str:
-        """Generate improvements section."""
-        if not self.analysis.improvements:
-            return "No specific recommendations at this time."
-        
-        return "\n".join(f"- {imp}" for imp in self.analysis.improvements)
+        # Doc style
+        has_docstrings = any(f.get("docstring") for f in all_funcs)
+        if has_docstrings:
+            profile.doc_style = "docstrings"
 
-    def _generate_key_modules_description(self) -> str:
-        """Generate key modules description."""
-        if not self.analysis.key_modules:
-            return "Check the directory structure above."
-        
-        return "\n".join(
-            f"- **{m if isinstance(m, str) else m.get('name', 'Unknown')}**"
-            for m in self.analysis.key_modules[:10]
-        )
+        # Structs
+        if lang in ("c", "c++", "rust", "go"):
+            profile.has_structs = True
 
-    def _generate_entry_points_description(self) -> str:
-        """Generate entry points description."""
-        if not self.analysis.entry_points:
-            return "Check main files in the project root."
-        
-        return "\n".join(f"- `{ep}`" for ep in self.analysis.entry_points[:10])
+        return profile
 
-    def _generate_entities_description(self) -> str:
-        """Generate entities description from dependency graph."""
-        nodes = self.analysis.dependency_graph.get("nodes", [])
-        classes = [n for n in nodes if n.get("type") == "class"][:10]
-        
-        if not classes:
-            return "Entities will be identified with deeper analysis."
-        
-        return "\n".join(
-            f"### {cls.get('name', 'Unknown')}\n\nLocation: `{cls.get('path', 'N/A')}`\n"
-            for cls in classes
-        )
+    # =========================================
+    # UTILITY METHODS
+    # =========================================
 
-    def _generate_main_flows_description(self) -> str:
-        """Generate main flows description."""
-        return """The main system flows include:
+    def _get_all_functions(self) -> list:
+        """Get all function details from file_tree."""
+        functions = []
+        for f in (self.analysis.file_tree or []):
+            for func in f.get("function_details", []):
+                if isinstance(func, dict):
+                    func["_file_path"] = f.get("path", "")
+                    functions.append(func)
+        return functions
 
-1. **Input Flow** - Receiving and validating data
-2. **Processing Flow** - Applying business rules
-3. **Output Flow** - Responding to client
+    def _get_all_classes(self) -> list:
+        """Get all class details from file_tree."""
+        classes = []
+        for f in (self.analysis.file_tree or []):
+            for cls in f.get("class_details", []):
+                if isinstance(cls, dict):
+                    cls["_file_path"] = f.get("path", "")
+                    classes.append(cls)
+        return classes
 
-Check sequence diagrams below for details.
-"""
+    def _detect_naming_convention(self, functions: list) -> str:
+        """Detect the dominant naming convention from function names."""
+        import re
+        snake = 0
+        camel = 0
+        pascal = 0
 
-    def _generate_components_list(self) -> str:
-        """Generate components list."""
-        if not self.analysis.key_modules:
-            return "Components will be listed after deeper analysis."
-        
-        return "\n".join(
-            f"### {m if isinstance(m, str) else m.get('name', 'Unknown')}\n\nSystem module.\n"
-            for m in self.analysis.key_modules[:10]
-        )
+        for func in functions[:50]:
+            name = func.get("name", "")
+            if not name or name.startswith("_"):
+                name = name.lstrip("_")
+            if not name:
+                continue
+            if "_" in name:
+                snake += 1
+            elif name[0].isupper():
+                pascal += 1
+            elif any(c.isupper() for c in name[1:]):
+                camel += 1
+            else:
+                snake += 1
 
-    def _generate_flow_description(self) -> str:
-        """Generate data flow description."""
-        return """Data flows through the following layers:
+        if pascal > camel and pascal > snake:
+            return "PascalCase"
+        elif camel > snake:
+            return "camelCase"
+        return "snake_case"
 
-1. **Input**: APIs, events, commands
-2. **Validation**: Data verification
-3. **Processing**: Business logic
-4. **Persistence**: Database, cache
-5. **Output**: Responses, events
-"""
+    def _extract_makefile_targets(self, content: str) -> dict:
+        """Extract targets from a Makefile."""
+        import re
+        targets = {}
+        reserved = {"else", "endif", "ifdef", "ifndef", "ifeq", "ifneq"}
+        for match in re.finditer(r'^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:', content, re.MULTILINE):
+            target = match.group(1)
+            if target not in reserved:
+                targets[target] = f"make {target}"
+        return targets
 
-    def _generate_connected_modules_list(self) -> str:
-        """Generate list of most connected modules."""
-        nodes = self.analysis.dependency_graph.get("nodes", [])
-        
-        # Count connections per module
-        edges = self.analysis.dependency_graph.get("edges", [])
-        connections = {}
-        for edge in edges:
-            source = edge.get("source", "")
-            target = edge.get("target", "")
-            connections[source] = connections.get(source, 0) + 1
-            connections[target] = connections.get(target, 0) + 1
-        
-        # Sort by connections
-        sorted_modules = sorted(connections.items(), key=lambda x: x[1], reverse=True)[:10]
-        
-        if not sorted_modules:
-            return "Connection data not available."
-        
-        return "\n".join(
-            f"- **{name.replace('file:', '')}**: {count} connections"
-            for name, count in sorted_modules
-        )
+    def _extract_npm_scripts(self, content: str) -> dict:
+        """Extract scripts from package.json content."""
+        try:
+            pkg = json.loads(content)
+            scripts = pkg.get("scripts", {})
+            return {name: f"npm run {name}" for name in scripts.keys()}
+        except Exception:
+            return {}
 
-    def _generate_full_components_catalog(self) -> str:
-        """Generate full components catalog."""
-        files = self.analysis.files_read
-        
-        if not files:
-            return "Components will be cataloged after file analysis."
-        
-        sections = []
-        for f in files[:20]:  # Limit to 20 files
-            path = f.get("path", "Unknown")
-            summary = f.get("summary", "N/A")
-            
-            sections.append(f"""### `{path}`
+    def _create_summary_from_docs(self, docs: dict[str, str]) -> str:
+        """
+        Create a single summary string from the multi-layer docs.
+        Used for backward-compatible storage.
+        """
+        priority = ["AGENTS.md", "llms.txt", "repomap.txt"]
 
-{summary if summary else 'File analyzed.'}
+        parts: list[str] = []
 
----
-""")
-        
-        return "\n".join(sections)
+        # Priority files first
+        for key in priority:
+            if key in docs:
+                parts.append(docs[key])
 
-    def _generate_layer_responsibilities(self) -> str:
-        """Generate layer responsibilities."""
-        arch = self.analysis.architecture_pattern.lower()
-        
-        if "clean" in arch:
-            return """
-| Layer | Responsibility | Should Not |
-|-------|----------------|------------|
-| Domain | Business rules | Depend on frameworks |
-| Application | Orchestrate use cases | Know infrastructure |
-| Adapters | Convert data | Contain business logic |
-| Infrastructure | Technical implementation | Contain business rules |
-"""
-        
-        return "Check architecture documentation for specific responsibilities."
+        # Then module ReadMe.LLM files
+        module_docs = sorted(k for k in docs if k.endswith("/ReadMe.LLM"))
+        for key in module_docs[:10]:
+            parts.append(docs[key])
 
-    def _generate_prerequisites(self) -> str:
-        """Generate prerequisites."""
-        lang = self.analysis.main_language.lower()
-        
-        if lang in ["python", "py"]:
-            return """- Python 3.10+
-- pip or poetry
-- Git
-"""
-        elif lang in ["typescript", "javascript", "ts", "js"]:
-            return """- Node.js 18+
-- npm/yarn/pnpm
-- Git
-"""
-        else:
-            return f"""- {self.analysis.main_language}
-- Git
-- Check README.md for specific requirements
-"""
+        # Mention remaining files
+        remaining = [
+            k for k in docs
+            if k not in priority and k not in module_docs[:10]
+        ]
+        if remaining:
+            parts.append(
+                f"\n---\n\n## Additional Files\n\n"
+                f"*{len(remaining)} additional documentation files available in storage.*\n\n"
+                f"### Available Files:\n"
+                + "\n".join(f"- `{f}`" for f in sorted(remaining))
+            )
 
-    def _generate_setup_steps(self) -> str:
-        """Generate setup steps."""
-        lang = self.analysis.main_language.lower()
-        
-        if lang in ["python", "py"]:
-            return """```bash
-# Clone
-git clone <repository-url>
-cd <project>
+        return "\n\n---\n\n".join(parts) if parts else "No documentation generated."
 
-# Virtual environment
-python -m venv venv
-source venv/bin/activate  # or venv\\Scripts\\activate on Windows
 
-# Dependencies
-pip install -r requirements.txt
-# or: poetry install
-```
-"""
-        elif lang in ["typescript", "javascript", "ts", "js"]:
-            return """```bash
-# Clone
-git clone <repository-url>
-cd <project>
+# ═══════════════════════════════════════════════════════════════
+#  Backward-compatible aliases
+# ═══════════════════════════════════════════════════════════════
 
-# Dependencies
-npm install
-# or: yarn / pnpm install
-```
-"""
-        else:
-            return "Check README.md for setup instructions."
-
-    def _generate_commands(self) -> str:
-        """Generate useful commands."""
-        lang = self.analysis.main_language.lower()
-        
-        if lang in ["python", "py"]:
-            return """```bash
-# Run
-python main.py
-# or: python -m src
-
-# Tests
-pytest
-
-# Lint
-ruff check .
-```
-"""
-        elif lang in ["typescript", "javascript", "ts", "js"]:
-            return """```bash
-# Development
-npm run dev
-
-# Build
-npm run build
-
-# Tests
-npm run test
-```
-"""
-        else:
-            return "Check README.md for specific commands."
-
-    def _generate_code_examples(self) -> str:
-        """Generate code examples."""
-        return """Check existing files in the repository for code examples
-that follow project patterns.
-"""
+# Keep the old class name available for imports that haven't updated yet
+DocumentationGenerator = MultiLayerDocGenerator
 
 
 def generate_documentation(
@@ -1434,11 +516,14 @@ def generate_documentation(
     improvements: list = None,
     entry_points: list = None,
     key_modules: list = None,
-    output_format: str = "summary",  # "summary" or "full"
+    file_tree: list = None,
+    code_chunks: list = None,
+    config_files_content: dict = None,
+    output_format: str = "summary",
 ) -> str | dict[str, str]:
     """
     Convenience function to generate documentation.
-    
+
     Args:
         project_name: Name of the project
         architecture_pattern: Detected architecture
@@ -1453,8 +538,11 @@ def generate_documentation(
         improvements: List of improvement suggestions
         entry_points: List of entry point files
         key_modules: List of key modules
+        file_tree: List of FileInfo dicts with function_details, class_details
+        code_chunks: List of CodeChunk data from embeddings
+        config_files_content: Dict of config file paths to their content
         output_format: "summary" for single file, "full" for complete structure
-        
+
     Returns:
         Single markdown string or dict of file paths to content
     """
@@ -1472,10 +560,13 @@ def generate_documentation(
         improvements=improvements or [],
         entry_points=entry_points or [],
         key_modules=key_modules or [],
+        file_tree=file_tree or [],
+        code_chunks=code_chunks or [],
+        config_files_content=config_files_content or {},
     )
-    
-    generator = DocumentationGenerator(analysis)
-    
+
+    generator = MultiLayerDocGenerator(analysis)
+
     if output_format == "full":
         return generator.generate_full_documentation()
     else:
