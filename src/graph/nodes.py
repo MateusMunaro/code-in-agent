@@ -87,7 +87,7 @@ class ReadStructureNode(BaseNode):
         file_tree = state["file_tree"]
         dep_graph = state["dependency_graph"]
         
-        self.log(f"\ud83d\udcca Input: {len(file_tree)} files, {len(dep_graph.get('nodes', []))} dep nodes, {len(dep_graph.get('edges', []))} dep edges")
+        self.log(f"[Input] {len(file_tree)} files, {len(dep_graph.get('nodes', []))} dep nodes, {len(dep_graph.get('edges', []))} dep edges")
 
         # Detect architecture from folder structure
         arch_candidates = detect_architecture_from_structure(file_tree)
@@ -383,8 +383,8 @@ class VerificationNode(BaseNode):
         hypothesis = state["architecture_hypothesis"]
         file_tree = state.get("file_tree", [])
 
-        self.log(f"\ud83d\udcc2 Files to read: {files_to_read}")
-        self.log(f"\ud83d\udcca Already have {len(state.get('files_read', []))} files_read, confidence={state.get('confidence', 0):.2f}")
+        self.log(f"[Files] Files to read: {files_to_read}")
+        self.log(f"[Status] Already have {len(state.get('files_read', []))} files_read, confidence={state.get('confidence', 0):.2f}")
 
         if not files_to_read:
             self.log("No files to read")
@@ -402,7 +402,7 @@ class VerificationNode(BaseNode):
             # Try stub-based content first (semantic approach)
             if file_meta and (file_meta.get("function_details") or file_meta.get("class_details")):
                 content = stub_builder.build_file_stub(file_meta)
-                self.log(f"\ud83e\udde9 Stub generated for {file_path} ({len(content)} chars vs {file_meta.get('line_count', '?')} original lines)")
+                self.log(f"[Stub] Stub generated for {file_path} ({len(content)} chars vs {file_meta.get('line_count', '?')} original lines)")
             else:
                 # Fallback: read raw content (unsupported languages or no metadata)
                 content = await self.git_service.get_file_content(repo_path, file_path)
@@ -607,7 +607,7 @@ class ResponseNode(BaseNode):
         repo_path = state.get("repo_path", "")
 
         # === DETAILED LOGGING ===
-        self.log(f"📊 Data pipeline status:")
+        self.log(f"[Pipeline] Data pipeline status:")
         self.log(f"   file_tree: {len(file_tree)} files")
         self.log(f"   files_read: {len(files_read)} files")
         self.log(f"   patterns_detected: {len(patterns)} patterns")
