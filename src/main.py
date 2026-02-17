@@ -136,7 +136,7 @@ class CodeIndexerWorker:
         """Process a single code indexing job."""
         job_id = job_data["job_id"]
         repo_url = job_data["repo_url"]
-        selected_model = job_data.get("selected_model", "gpt-4o-mini")
+        selected_model = job_data.get("selected_model", "gemini-2.5-flash")
         github_token = job_data.get("github_token")  # Token for PR creation
 
         print(f"\n{'='*60}")
@@ -156,11 +156,22 @@ class CodeIndexerWorker:
             await self.publish_status(job_id, "processing", "Parsing code structure...", 30)
             file_tree = await self.parser_service.parse_repository(repo_path)
             print(f"✅ Parsed {len(file_tree)} files")
+            
+            # Log AST data quality
+            total_funcs = sum(len(f.get('function_details', [])) for f in file_tree)
+            total_classes = sum(len(f.get('class_details', [])) for f in file_tree)
+            total_imports = sum(len(f.get('imports', [])) for f in file_tree)
+            languages = set(f.get('language', '?') for f in file_tree)
+            print(f"📊 AST data: {total_funcs} functions, {total_classes} classes, {total_imports} imports")
+            print(f"📊 Languages: {languages}")
+            if file_tree:
+                sample = file_tree[0]
+                print(f"📊 Sample file: {sample.get('path', '?')} -> funcs={len(sample.get('function_details', []))}, classes={len(sample.get('class_details', []))}")
 
             # Step 3: Build dependency graph
             await self.publish_status(job_id, "processing", "Building dependency graph...", 50)
             dep_graph = await self.graph_builder.build_graph(repo_path, file_tree)
-            print(f"✅ Built dependency graph with {len(dep_graph.get('nodes', []))} nodes")
+            print(f"✅ Built dependency graph with {len(dep_graph.get('nodes', []))} nodes, {len(dep_graph.get('edges', []))} edges")
 
             # Step 4: Run LangGraph agent
             await self.publish_status(job_id, "processing", "Analyzing with AI agent...", 70)

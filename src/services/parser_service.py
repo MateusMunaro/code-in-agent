@@ -48,6 +48,7 @@ class ClassDetail:
     bases: list[str] = field(default_factory=list)  # Parent classes (inheritance)
     decorators: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)  # Method names
+    method_details: list = field(default_factory=list)  # list[FunctionDetail] - rich method info
     docstring: Optional[str] = None
     implements: list[str] = field(default_factory=list)  # Interfaces (for TS/Java)
 
@@ -84,7 +85,7 @@ LANGUAGE_MAP = {
     ".cjs": "javascript",
     ".jsx": "javascript",
     ".ts": "typescript",
-    ".tsx": "typescript",
+    ".tsx": "tsx",
     ".java": "java",
     ".go": "go",
     ".rs": "rust",
@@ -267,7 +268,7 @@ class ParserService:
         # Fallback to regex-based parsing
         if language == "python":
             self._parse_python(content, file_info)
-        elif language in ("javascript", "typescript"):
+        elif language in ("javascript", "typescript", "tsx"):
             self._parse_javascript(content, file_info)
         elif language == "java":
             self._parse_java(content, file_info)
@@ -299,13 +300,34 @@ class ParserService:
         elif language in ("javascript", "typescript", "tsx"):
             self._extract_js_ts_ast(root, content, file_info, language)
 
+    def _extract_decorators(self, node, content: str) -> list[str]:
+        """Extract decorators from a decorated_definition or from sibling decorator nodes."""
+        decorators = []
+        
+        def get_node_text(n) -> str:
+            return content[n.start_byte:n.end_byte]
+        
+        # In Python, decorators are children of the parent `decorated_definition` node
+        parent = node.parent
+        if parent and parent.type == "decorated_definition":
+            for child in parent.children:
+                if child.type == "decorator":
+                    decorators.append(get_node_text(child).strip())
+        
+        return decorators
+
     def _extract_python_ast(self, root, content: str, file_info: FileInfo):
         """Extract Python AST information using Tree-sitter."""
         
         def get_node_text(node) -> str:
             return content[node.start_byte:node.end_byte]
         
+        # Track current class being built so methods can be added to method_details
+        current_class_detail: Optional[ClassDetail] = None
+        
         def traverse(node, parent_class: Optional[str] = None):
+            nonlocal current_class_detail
+            
             # Import statements
             if node.type == "import_statement":
                 for child in node.children:
@@ -321,15 +343,26 @@ class ParserService:
                 if module_name:
                     file_info.imports.append(module_name)
             
+            # Decorated definitions (wraps function_definition or class_definition)
+            elif node.type == "decorated_definition":
+                # Don't process the decorated_definition itself, just recurse
+                # The decorators will be extracted by children
+                for child in node.children:
+                    if child.type in ("function_definition", "class_definition"):
+                        traverse(child, parent_class)
+                return  # Don't recurse normally
+            
             # Function definitions
             elif node.type == "function_definition":
                 func_name = None
                 params = []
-                decorators = []
                 is_async = False
                 calls = []
                 docstring = None
                 return_type = None
+                
+                # Extract decorators from parent decorated_definition
+                decorators = self._extract_decorators(node, content)
                 
                 # Check for async
                 for child in node.children:
@@ -342,10 +375,8 @@ class ParserService:
                             if param.type == "identifier":
                                 params.append(get_node_text(param))
                             elif param.type in ("typed_parameter", "default_parameter"):
-                                for p in param.children:
-                                    if p.type == "identifier":
-                                        params.append(get_node_text(p))
-                                        break
+                                # Extract full typed parameter text for richer signatures
+                                params.append(get_node_text(param))
                     elif child.type == "type":
                         return_type = get_node_text(child)
                     elif child.type == "block":
@@ -361,8 +392,7 @@ class ParserService:
                         calls = self._find_calls_in_node(child, content)
                 
                 if func_name:
-                    file_info.functions.append(func_name)
-                    file_info.function_details.append(FunctionDetail(
+                    func_detail = FunctionDetail(
                         name=func_name,
                         start_line=node.start_point[0] + 1,
                         end_line=node.end_point[0] + 1,
@@ -374,7 +404,13 @@ class ParserService:
                         is_async=is_async,
                         is_method=parent_class is not None,
                         parent_class=parent_class,
-                    ))
+                    )
+                    file_info.functions.append(func_name)
+                    file_info.function_details.append(func_detail)
+                    
+                    # Also add to current class's method_details
+                    if current_class_detail is not None and parent_class is not None:
+                        current_class_detail.method_details.append(func_detail)
             
             # Class definitions
             elif node.type == "class_definition":
@@ -382,7 +418,12 @@ class ParserService:
                 bases = []
                 methods = []
                 docstring = None
-                decorators = []
+                
+                # Extract decorators from parent decorated_definition
+                decorators = self._extract_decorators(node, content)
+                
+                # Create ClassDetail early so methods can reference it
+                prev_class_detail = current_class_detail
                 
                 for child in node.children:
                     if child.type == "name":
@@ -400,26 +441,46 @@ class ParserService:
                                         docstring = get_node_text(expr).strip('"""\'')
                                         break
                                 break
-                        # Find methods
-                        for block_child in child.children:
-                            if block_child.type == "function_definition":
-                                traverse(block_child, class_name)
-                                for c in block_child.children:
-                                    if c.type == "name":
-                                        methods.append(get_node_text(c))
-                                        break
                 
                 if class_name:
-                    file_info.classes.append(class_name)
-                    file_info.class_details.append(ClassDetail(
+                    class_detail = ClassDetail(
                         name=class_name,
                         start_line=node.start_point[0] + 1,
                         end_line=node.end_point[0] + 1,
                         bases=bases,
                         decorators=decorators,
-                        methods=methods,
+                        methods=[],
+                        method_details=[],
                         docstring=docstring,
-                    ))
+                    )
+                    
+                    # Set as current class so traverse of methods populates method_details
+                    current_class_detail = class_detail
+                    
+                    # Now traverse the block to find methods
+                    for child in node.children:
+                        if child.type == "block":
+                            for block_child in child.children:
+                                if block_child.type in ("function_definition", "decorated_definition"):
+                                    traverse(block_child, class_name)
+                                    # Extract method name
+                                    target = block_child
+                                    if block_child.type == "decorated_definition":
+                                        for dc in block_child.children:
+                                            if dc.type == "function_definition":
+                                                target = dc
+                                                break
+                                    for c in target.children:
+                                        if c.type == "name":
+                                            methods.append(get_node_text(c))
+                                            break
+                    
+                    class_detail.methods = methods
+                    file_info.classes.append(class_name)
+                    file_info.class_details.append(class_detail)
+                    
+                    # Restore previous class context
+                    current_class_detail = prev_class_detail
                 return  # Don't traverse into class again
             
             # Call expressions (for file-level calls)
@@ -439,6 +500,20 @@ class ParserService:
         
         def get_node_text(node) -> str:
             return content[node.start_byte:node.end_byte]
+        
+        def extract_js_decorators(node) -> list[str]:
+            """Extract decorators from a TS/JS node (TypeScript experimental decorators)."""
+            decorators = []
+            # Check previous siblings for decorator nodes
+            parent = node.parent
+            if parent:
+                for child in parent.children:
+                    if child.type == "decorator" and child.end_byte <= node.start_byte:
+                        decorators.append(get_node_text(child).strip())
+            return decorators
+        
+        # Track current class being built
+        current_class_detail: list = []  # Stack for nested classes
         
         def traverse(node, parent_class: Optional[str] = None):
             # Import statements
@@ -460,6 +535,8 @@ class ParserService:
                 params = []
                 is_async = False
                 calls = []
+                return_type = None
+                decorators = extract_js_decorators(node)
                 
                 for child in node.children:
                     if child.type == "async":
@@ -473,25 +550,44 @@ class ParserService:
                             if param.type == "identifier":
                                 params.append(get_node_text(param))
                             elif param.type == "required_parameter":
-                                for p in param.children:
-                                    if p.type == "identifier":
-                                        params.append(get_node_text(p))
-                                        break
+                                # Extract full typed parameter for richer signatures
+                                params.append(get_node_text(param))
+                    elif child.type == "type_annotation":
+                        # Return type annotation (TypeScript)
+                        return_type = get_node_text(child).lstrip(": ").strip()
                     elif child.type == "statement_block":
                         calls = self._find_calls_in_node(child, content)
                 
+                # Arrow functions don't have an identifier child — the name
+                # lives in the parent variable_declarator:
+                #   const foo = () => {}  →  variable_declarator > identifier "foo"
+                if func_name is None and node.type == "arrow_function":
+                    parent = node.parent
+                    if parent and parent.type == "variable_declarator":
+                        for child in parent.children:
+                            if child.type == "identifier":
+                                func_name = get_node_text(child)
+                                break
+                
                 if func_name:
-                    file_info.functions.append(func_name)
-                    file_info.function_details.append(FunctionDetail(
+                    func_detail = FunctionDetail(
                         name=func_name,
                         start_line=node.start_point[0] + 1,
                         end_line=node.end_point[0] + 1,
                         parameters=params,
+                        return_type=return_type,
+                        decorators=decorators,
                         is_async=is_async,
                         is_method=parent_class is not None,
                         parent_class=parent_class,
                         calls=calls,
-                    ))
+                    )
+                    file_info.functions.append(func_name)
+                    file_info.function_details.append(func_detail)
+                    
+                    # Add to current class's method_details
+                    if current_class_detail and parent_class is not None:
+                        current_class_detail[-1].method_details.append(func_detail)
             
             # Class declarations
             elif node.type == "class_declaration":
@@ -499,6 +595,7 @@ class ParserService:
                 bases = []
                 implements = []
                 methods = []
+                decorators = extract_js_decorators(node)
                 
                 for child in node.children:
                     if child.type == "type_identifier" or child.type == "identifier":
@@ -514,25 +611,36 @@ class ParserService:
                                 for h in heritage.children:
                                     if h.type in ("type_identifier", "identifier"):
                                         implements.append(get_node_text(h))
-                    elif child.type == "class_body":
-                        for body_child in child.children:
-                            if body_child.type == "method_definition":
-                                traverse(body_child, class_name)
-                                for c in body_child.children:
-                                    if c.type in ("property_identifier", "identifier"):
-                                        methods.append(get_node_text(c))
-                                        break
                 
                 if class_name:
-                    file_info.classes.append(class_name)
-                    file_info.class_details.append(ClassDetail(
+                    class_detail = ClassDetail(
                         name=class_name,
                         start_line=node.start_point[0] + 1,
                         end_line=node.end_point[0] + 1,
                         bases=bases,
-                        methods=methods,
+                        decorators=decorators,
+                        methods=[],
+                        method_details=[],
                         implements=implements,
-                    ))
+                    )
+                    
+                    current_class_detail.append(class_detail)
+                    
+                    # Traverse class body to find methods
+                    for child in node.children:
+                        if child.type == "class_body":
+                            for body_child in child.children:
+                                if body_child.type == "method_definition":
+                                    traverse(body_child, class_name)
+                                    for c in body_child.children:
+                                        if c.type in ("property_identifier", "identifier"):
+                                            methods.append(get_node_text(c))
+                                            break
+                    
+                    class_detail.methods = methods
+                    file_info.classes.append(class_name)
+                    file_info.class_details.append(class_detail)
+                    current_class_detail.pop()
                 return
             
             # Recurse

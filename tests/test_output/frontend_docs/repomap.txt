@@ -1,0 +1,92 @@
+# repomap.txt — frontend
+# AST-compressed repository map (symbols only, no bodies)
+# Generated: 2026-02-16
+# Language: TypeScript
+#
+
+# Stats: 15 files, 24 functions, 0 classes
+#
+
+├── eslint.config.mjs  (19L)
+│   exports: eslintConfig
+├── next-env.d.ts  (7L)
+├── next.config.ts  (10L)
+│   exports: nextConfig
+├── postcss.config.mjs  (8L)
+│   exports: config
+
+src\app/
+  ├── layout.tsx  (35L)
+  │   def RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>)
+  ├── page.tsx  (167L)
+  │   def HomePage()
+  │   async def fetchJobs()
+  │   def handleJobCreated(jobId: string)
+
+src\app\jobs/
+  ├── page.tsx  (167L)
+  │   def JobsPage()
+  │   async def fetchJobs()
+
+src\app\jobs\[id]/
+  ├── page.tsx  (239L)
+  │   def JobDetailPage({ params }: PageProps)
+  │   async def fetchJob()
+  │   async def handleRetry()
+  │   async def handleCancel()
+
+src\components/
+  ├── DocumentationViewer.tsx  (242L)
+  │   def DocumentationViewer({
+  documentation,
+  patterns = [],
+  architectureType,
+  confidenceScore,
+  improvements = [],
+  reasoningSteps = [],
+}: DocumentationViewerProps)
+  │   def sNam(, children, ...props }) {
+             )
+  │   def  {
+  return (
+    <di()
+  ├── JobStatus.tsx  (111L)
+  │   def JobStatus({
+  status,
+  progress = 0,
+  message,
+  showProgress = true,
+}: JobStatusProps)
+  │   def Badge({
+  stat(s,
+}: {
+  status: "pending" | "processing" | "completed" | "failed";
+}) {
+  con)
+  ├── ModelSelector.tsx  (158L)
+  │   def ModelSelector({
+  value,
+  onChange,
+  disabled = false,
+  showDescription = true,
+}: ModelSelectorProps)
+  │   async def fetchModels()
+  │   def  modelId }( { modelId: string }) {
+  const )
+  ├── RepoSubmitForm.tsx  (156L)
+  │   def RepoSubmitForm({ onSubmit }: RepoSubmitFormProps)
+  │   async def handleSubmit(e: React.FormEvent)
+  │   def isValidUrl(url: string)
+  ├── index.ts  (5L)
+
+src\lib/
+  ├── api.ts  (153L)
+  │   async def apiFetch(endpoint: string, options: RequestInit = {}) -> Promise<ApiResponse<T>>
+  ├── websocket.ts  (211L)
+  │   def useWebSocket(options: UseWebSocketOptions = {}) -> UseWebSocketReturn
+  │   def scription(jobId: s(ring | null) {
+  con)

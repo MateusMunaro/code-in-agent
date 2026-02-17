@@ -22,6 +22,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from .state import AgentState, ReasoningStep, PatternInfo, FileContent, CodeChunk, SemanticResult, detect_architecture_from_structure
 from ..llm.provider import MultiModelChat
 from ..services.git_service import GitService
+from ..services.stub_builder import StubBuilder
 
 
 class BaseNode:
@@ -85,6 +86,8 @@ class ReadStructureNode(BaseNode):
 
         file_tree = state["file_tree"]
         dep_graph = state["dependency_graph"]
+        
+        self.log(f"\ud83d\udcca Input: {len(file_tree)} files, {len(dep_graph.get('nodes', []))} dep nodes, {len(dep_graph.get('edges', []))} dep edges")
 
         # Detect architecture from folder structure
         arch_candidates = detect_architecture_from_structure(file_tree)
@@ -378,24 +381,39 @@ class VerificationNode(BaseNode):
         files_to_read = state["files_to_read"][:5]  # Limit files per iteration
         repo_path = state["repo_path"]
         hypothesis = state["architecture_hypothesis"]
+        file_tree = state.get("file_tree", [])
+
+        self.log(f"\ud83d\udcc2 Files to read: {files_to_read}")
+        self.log(f"\ud83d\udcca Already have {len(state.get('files_read', []))} files_read, confidence={state.get('confidence', 0):.2f}")
 
         if not files_to_read:
             self.log("No files to read")
             return {}
 
-        # Read files
+        # Build file_tree index for quick lookup
+        tree_index = {f.get("path", ""): f for f in file_tree}
+        stub_builder = StubBuilder()
+
+        # Read files — prefer stubs from file_tree metadata, fallback to raw content
         files_content = []
         for file_path in files_to_read:
-            content = await self.git_service.get_file_content(repo_path, file_path)
-            if content:
-                # Truncate very long files
-                if len(content) > 5000:
+            file_meta = tree_index.get(file_path)
+            
+            # Try stub-based content first (semantic approach)
+            if file_meta and (file_meta.get("function_details") or file_meta.get("class_details")):
+                content = stub_builder.build_file_stub(file_meta)
+                self.log(f"\ud83e\udde9 Stub generated for {file_path} ({len(content)} chars vs {file_meta.get('line_count', '?')} original lines)")
+            else:
+                # Fallback: read raw content (unsupported languages or no metadata)
+                content = await self.git_service.get_file_content(repo_path, file_path)
+                if content and len(content) > 5000:
                     content = content[:5000] + "\n... (truncated)"
 
+            if content:
                 files_content.append(FileContent(
                     path=file_path,
                     content=content,
-                    language=Path(file_path).suffix,
+                    language=file_meta.get("language", Path(file_path).suffix) if file_meta else Path(file_path).suffix,
                     summary=None,
                 ))
 
@@ -456,7 +474,7 @@ class VerificationNode(BaseNode):
         step = ReasoningStep(
             iteration=state["iteration"],
             node="VerificationNode",
-            action=f"Read and analyzed {len(files_content)} files (Map-Reduce)",
+            action=f"Read and analyzed {len(files_content)} files (Map-Reduce with stubs)",
             observation=combined_observations[:200] if combined_observations else "Files analyzed",
             confidence_delta=avg_confidence_delta,
         )
@@ -490,7 +508,8 @@ class VerificationNode(BaseNode):
             ou None se falhar
         """
         # Truncar conteúdo para o limite
-        content = file_content["content"][:self.MAX_CONTENT_PER_FILE]
+        # Content is already a compact stub (or truncated raw), no need to re-truncate
+        content = file_content["content"]
         
         prompt = f"""Analyze this single file for the architecture hypothesis: "{hypothesis}"
         
@@ -561,11 +580,10 @@ class ResponseNode(BaseNode):
     """
     Node that generates the final documentation proposal.
     
-    Uses structured documentation templates to generate:
-    - Visual diagrams (Mermaid)
-    - Architecture context
-    - Usage guides
-    - Agent rules
+    Uses the multi-layer documentation architecture to generate:
+    - Root Level: llms.txt, AGENTS.md, repomap.txt
+    - Module Level: {module}/ReadMe.LLM, {module}/AGENTS.md
+    - Semantic Layer: _codein/* (Phase 3)
     
     This creates AI-friendly documentation that helps coding assistants
     understand and work with the codebase effectively.
@@ -587,8 +605,29 @@ class ResponseNode(BaseNode):
         file_tree = state["file_tree"]
         repo_path = state.get("repo_path", "")
 
+        # === DETAILED LOGGING ===
+        self.log(f"📊 Data pipeline status:")
+        self.log(f"   file_tree: {len(file_tree)} files")
+        self.log(f"   files_read: {len(files_read)} files")
+        self.log(f"   patterns_detected: {len(patterns)} patterns")
+        self.log(f"   dependency_graph nodes: {len(dep_graph.get('nodes', []))}")
+        self.log(f"   dependency_graph edges: {len(dep_graph.get('edges', []))}")
+        self.log(f"   hypothesis: {hypothesis}")
+        self.log(f"   improvements: {len(improvements)}")
+
+        # Log file_tree detail sample
+        if file_tree:
+            sample = file_tree[0]
+            funcs = len(sample.get('function_details', []))
+            classes = len(sample.get('class_details', []))
+            self.log(f"   file_tree[0] sample: path={sample.get('path', '?')}, funcs={funcs}, classes={classes}")
+            total_funcs = sum(len(f.get('function_details', [])) for f in file_tree)
+            total_classes = sum(len(f.get('class_details', [])) for f in file_tree)
+            self.log(f"   file_tree totals: {total_funcs} functions, {total_classes} classes across {len(file_tree)} files")
+
         # Detect main language and framework
         main_language, framework = self._detect_language_and_framework(files_read, file_tree)
+        self.log(f"🔍 Detected language: {main_language}, framework: {framework}")
         
         # Extract project name from repo path
         project_name = Path(repo_path).name if repo_path else "Project"
@@ -599,9 +638,19 @@ class ResponseNode(BaseNode):
         # Extract entry points and key modules
         entry_points = self._extract_entry_points(dep_graph)
         key_modules = self._extract_key_modules(file_tree, dep_graph)
+        self.log(f"🔍 Entry points: {entry_points[:5]}")
+        self.log(f"🔍 Key modules: {key_modules[:5]}")
+
+        # Extract tech stack
+        tech_stack = self._extract_tech_stack(files_read)
+        self.log(f"🔍 Tech stack: {tech_stack}")
+
+        # Extract config file contents (reads from filesystem, not files_read)
+        config_contents = self._extract_config_contents(repo_path)
+        self.log(f"📁 Config files found: {list(config_contents.keys())}")
 
         # Generate structured documentation using our templates
-        self.log("Using structured documentation templates...")
+        self.log("📝 Using structured documentation templates...")
         
         # Get job_id from state for storage upload
         job_id = state.get("job_id", "")
@@ -620,19 +669,22 @@ class ResponseNode(BaseNode):
                 architecture_pattern=hypothesis,
                 confidence=state["confidence"],
                 main_language=main_language,
-                files_read=[{"path": f["path"], "summary": f.get("summary", "")} for f in files_read],
+                files_read=[{"path": f["path"], "content": f.get("content", ""), "summary": f.get("summary", "")} for f in files_read],
                 patterns_detected=patterns,
                 dependency_graph=dep_graph,
                 directory_structure=directory_structure,
                 framework=framework,
-                tech_stack=self._extract_tech_stack(files_read),
+                tech_stack=tech_stack,
                 improvements=improvements,
                 entry_points=entry_points,
                 key_modules=key_modules,
+                file_tree=file_tree,
+                code_chunks=state.get("code_chunks", []),
+                config_files_content=config_contents,
                 output_format="full",  # Generate full documentation structure
             )
             
-            self.log(f"Generated {len(docs_dict)} documentation files")
+            self.log(f"✅ Generated {len(docs_dict)} documentation files")
             
             # Upload to Supabase Storage if job_id is available
             if job_id and isinstance(docs_dict, dict):
@@ -876,6 +928,11 @@ class ResponseNode(BaseNode):
                     deps = list(pkg.get("dependencies", {}).keys())[:5]
                     if deps:
                         tech_stack["Main Dependencies"] = ", ".join(deps)
+                    dev_deps = list(pkg.get("devDependencies", {}).keys())[:5]
+                    if dev_deps:
+                        tech_stack["Dev Dependencies"] = ", ".join(dev_deps)
+                    if pkg.get("scripts"):
+                        tech_stack["Scripts"] = ", ".join(list(pkg["scripts"].keys())[:5])
                 except:
                     pass
             
@@ -892,8 +949,86 @@ class ResponseNode(BaseNode):
                     tech_stack["Package Manager"] = "Poetry"
                 elif "pdm" in content.lower():
                     tech_stack["Package Manager"] = "PDM"
+                elif "hatch" in content.lower():
+                    tech_stack["Package Manager"] = "Hatch"
+            
+            # Check Cargo.toml
+            elif "cargo.toml" in path:
+                tech_stack["Build System"] = "Cargo"
+                tech_stack["Language Runtime"] = "Rust"
+            
+            # Check go.mod
+            elif "go.mod" in path:
+                tech_stack["Build System"] = "Go Modules"
+                tech_stack["Language Runtime"] = "Go"
+            
+            # Check Makefile / CMakeLists
+            elif path.endswith("makefile") or path == "makefile":
+                tech_stack["Build System"] = "Make"
+            elif "cmakelists.txt" in path:
+                tech_stack["Build System"] = "CMake"
         
         return tech_stack
+
+    def _extract_config_contents(self, repo_path: str) -> dict:
+        """Extract content of configuration files directly from the repository filesystem."""
+        config_patterns = [
+            "package.json", "requirements.txt", "pyproject.toml", "setup.py",
+            "setup.cfg", "Cargo.toml", "go.mod", "go.sum",
+            "Makefile", "makefile", "CMakeLists.txt", "meson.build",
+            "docker-compose.yml", "docker-compose.yaml", "Dockerfile",
+            ".env.example", ".env.sample",
+            "tsconfig.json", "vite.config.ts", "vite.config.js",
+            "next.config.js", "next.config.mjs", "next.config.ts",
+            "webpack.config.js", "rollup.config.js",
+            "jest.config.js", "jest.config.ts", "vitest.config.ts",
+            "pytest.ini", "tox.ini",
+            ".eslintrc.json", ".eslintrc.js", ".prettierrc",
+            "README.md", "README.txt", "README.rst",
+        ]
+        
+        config_contents = {}
+        
+        if not repo_path:
+            self.log("⚠️ No repo_path available for config extraction")
+            return config_contents
+        
+        repo_root = Path(repo_path)
+        if not repo_root.exists():
+            self.log(f"⚠️ Repo path does not exist: {repo_path}")
+            return config_contents
+        
+        for pattern in config_patterns:
+            config_file = repo_root / pattern
+            if config_file.is_file():
+                try:
+                    content = config_file.read_text(encoding='utf-8', errors='ignore')
+                    if content:
+                        config_contents[pattern] = content[:8000]  # Limit size
+                        self.log(f"   📄 Found config: {pattern} ({len(content)} bytes)")
+                except Exception as e:
+                    self.log(f"   ⚠️ Failed to read {pattern}: {e}")
+        
+        # Also search one level deep for common config files
+        for subdir in repo_root.iterdir():
+            if subdir.is_dir() and subdir.name not in {
+                'node_modules', '__pycache__', '.git', 'venv', 'dist', 'build',
+                '.venv', 'target', '.next', 'coverage'
+            }:
+                for pattern in ['package.json', 'Cargo.toml', 'go.mod', 'Makefile', 'CMakeLists.txt']:
+                    config_file = subdir / pattern
+                    if config_file.is_file():
+                        try:
+                            content = config_file.read_text(encoding='utf-8', errors='ignore')
+                            if content:
+                                rel_path = f"{subdir.name}/{pattern}"
+                                config_contents[rel_path] = content[:8000]
+                                self.log(f"   📄 Found config: {rel_path} ({len(content)} bytes)")
+                        except Exception:
+                            pass
+        
+        self.log(f"📁 Total config files extracted: {len(config_contents)}")
+        return config_contents
 
     async def _enhance_with_llm(self, state: AgentState, documentation: str) -> str:
         """Optionally enhance documentation with LLM for specific insights."""
@@ -938,6 +1073,7 @@ Keep it practical and actionable. Return only the section content in Markdown.""
         Create a summary documentation from the full docs dictionary.
         
         Combines key files into a single markdown for backward compatibility.
+        Uses the new multi-layer documentation keys.
         
         Args:
             docs_dict: Dictionary of file paths to content
@@ -945,13 +1081,11 @@ Keep it practical and actionable. Return only the section content in Markdown.""
         Returns:
             Single markdown string with combined documentation
         """
-        # Priority order for summary
+        # Priority order — root governance files first
         priority_files = [
-            "docs/STRUCTURE.md",
-            "docs/charts/01_ARCHITECTURE_OVERVIEW.md",
-            "docs/charts/02_CLASS_DIAGRAM.md",
-            "docs/usage/00_INDEX.md",
-            "docs/AGENT_RULES.md",
+            "AGENTS.md",
+            "llms.txt",
+            "repomap.txt",
         ]
         
         summary_parts = []
@@ -959,11 +1093,16 @@ Keep it practical and actionable. Return only the section content in Markdown.""
         # Add priority files first
         for file_path in priority_files:
             if file_path in docs_dict:
-                content = docs_dict[file_path]
-                summary_parts.append(content)
+                summary_parts.append(docs_dict[file_path])
         
-        # Add remaining files as appendix (limited)
-        other_files = [k for k in docs_dict.keys() if k not in priority_files]
+        # Add module ReadMe.LLM files (limited to top 10)
+        module_docs = sorted(k for k in docs_dict if k.endswith("/ReadMe.LLM"))
+        for file_path in module_docs[:10]:
+            summary_parts.append(docs_dict[file_path])
+        
+        # Add remaining files as appendix
+        included = set(priority_files) | set(module_docs[:10])
+        other_files = [k for k in docs_dict.keys() if k not in included]
         if other_files:
             summary_parts.append("\n---\n\n## Additional Documentation\n")
             summary_parts.append(f"\n*{len(other_files)} additional documentation files available in storage.*\n")
@@ -1063,7 +1202,7 @@ class EmbeddingsNode(BaseNode):
     """
 
     async def __call__(self, state: AgentState) -> dict:
-        self.log("Generating embeddings for code chunks...")
+        self.log("Generating embeddings for code chunks (using code stubs)...")
 
         file_tree = state.get("file_tree", [])
         repo_path = state.get("repo_path", "")
@@ -1080,75 +1219,53 @@ class EmbeddingsNode(BaseNode):
             self.log(f"Embedding service unavailable: {e}")
             return {"embeddings_ready": False, "code_chunks": []}
 
-        # Create code chunks from function_details and class_details
+        # Use StubBuilder to generate code-native representations for embeddings
+        stub_builder = StubBuilder()
         chunks = []
         
         for file_info in file_tree:
             file_path = file_info.get("path", "")
             language = file_info.get("language", "")
             
-            # Process function details
+            # Process function details — embed as code stubs
             function_details = file_info.get("function_details", [])
             for func in function_details:
-                if isinstance(func, dict):
-                    name = func.get("name", "")
-                    start_line = func.get("start_line", 0)
-                    end_line = func.get("end_line", 0)
-                    docstring = func.get("docstring", "")
-                    params = func.get("parameters", [])
-                else:
+                if not isinstance(func, dict):
                     continue
                 
-                # Create a textual representation for embedding
-                content = f"Function: {name}\n"
-                if params:
-                    content += f"Parameters: {', '.join(params)}\n"
-                if docstring:
-                    content += f"Description: {docstring}\n"
-                content += f"File: {file_path}"
+                # Generate code-native stub instead of generic text
+                content = stub_builder.build_function_stub(func, language)
+                content += f"\n# File: {file_path}" if language == "python" else f"\n// File: {file_path}"
                 
                 chunks.append({
                     "content": content,
                     "file_path": file_path,
                     "language": language,
                     "chunk_type": "function",
-                    "name": name,
-                    "start_line": start_line,
-                    "end_line": end_line,
+                    "name": func.get("name", ""),
+                    "start_line": func.get("start_line", 0),
+                    "end_line": func.get("end_line", 0),
                     "embedding": None,
                 })
             
-            # Process class details
+            # Process class details — embed as code stubs
             class_details = file_info.get("class_details", [])
             for cls in class_details:
-                if isinstance(cls, dict):
-                    name = cls.get("name", "")
-                    start_line = cls.get("start_line", 0)
-                    end_line = cls.get("end_line", 0)
-                    docstring = cls.get("docstring", "")
-                    methods = cls.get("methods", [])
-                    bases = cls.get("bases", [])
-                else:
+                if not isinstance(cls, dict):
                     continue
                 
-                # Create a textual representation for embedding
-                content = f"Class: {name}\n"
-                if bases:
-                    content += f"Inherits from: {', '.join(bases)}\n"
-                if methods:
-                    content += f"Methods: {', '.join(methods)}\n"
-                if docstring:
-                    content += f"Description: {docstring}\n"
-                content += f"File: {file_path}"
+                # Generate code-native stub instead of generic text
+                content = stub_builder.build_class_stub(cls, language)
+                content += f"\n# File: {file_path}" if language == "python" else f"\n// File: {file_path}"
                 
                 chunks.append({
                     "content": content,
                     "file_path": file_path,
                     "language": language,
                     "chunk_type": "class",
-                    "name": name,
-                    "start_line": start_line,
-                    "end_line": end_line,
+                    "name": cls.get("name", ""),
+                    "start_line": cls.get("start_line", 0),
+                    "end_line": cls.get("end_line", 0),
                     "embedding": None,
                 })
 
@@ -1156,7 +1273,7 @@ class EmbeddingsNode(BaseNode):
             self.log("No chunks to embed")
             return {"embeddings_ready": False, "code_chunks": []}
 
-        self.log(f"Generating embeddings for {len(chunks)} code chunks...")
+        self.log(f"Generating embeddings for {len(chunks)} code stubs...")
 
         try:
             # Generate embeddings in batches
@@ -1177,13 +1294,13 @@ class EmbeddingsNode(BaseNode):
                 for c in embedded_chunks
             ]
             
-            self.log(f"Successfully generated {len(code_chunks)} embeddings")
+            self.log(f"Successfully generated {len(code_chunks)} embeddings from code stubs")
             
             step = ReasoningStep(
                 iteration=state["iteration"],
                 node="EmbeddingsNode",
-                action=f"Generated embeddings for {len(code_chunks)} code chunks",
-                observation=f"Embedded {len([c for c in code_chunks if c.get('chunk_type') == 'function'])} functions and {len([c for c in code_chunks if c.get('chunk_type') == 'class'])} classes",
+                action=f"Generated embeddings for {len(code_chunks)} code stubs",
+                observation=f"Embedded {len([c for c in code_chunks if c.get('chunk_type') == 'function'])} functions and {len([c for c in code_chunks if c.get('chunk_type') == 'class'])} classes as code stubs",
                 confidence_delta=0.05,
             )
             
