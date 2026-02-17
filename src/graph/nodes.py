@@ -590,6 +590,7 @@ class ResponseNode(BaseNode):
     """
 
     async def __call__(self, state: AgentState) -> dict:
+        self.chat.set_task_context("Response")
         self.log("Generating structured documentation...")
 
         # Import the documentation generator
