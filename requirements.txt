@@ -37,6 +37,9 @@ tenacity>=8.0.0
 structlog>=24.0.0
 tiktoken>=0.7.0
 
+# MCP Server
+mcp[server]>=1.0.0
+
 # Async support
 aiofiles>=23.0.0
 

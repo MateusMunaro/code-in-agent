@@ -165,6 +165,133 @@ def create_initial_state(
     )
 
 
+def create_mcp_analysis_state(
+    payload: dict,
+    job_id: str,
+    max_iterations: int = 5,
+) -> AgentState:
+    """
+    Create an initial state for MCP analysis (dry-run) from a CLI payload.
+    
+    Builds file_tree from the payload's files (scan_result) or changes
+    (diff_result) instead of cloning a repository. No GitHub token is
+    set, so the agent will never attempt to create PRs.
+    
+    Args:
+        payload: The full MCP payload dict (scan_result or diff_result)
+        job_id: Job ID for tracking
+        max_iterations: Maximum reasoning iterations
+        
+    Returns:
+        Initial AgentState ready for analysis
+    """
+    metadata = payload.get("metadata", {})
+    payload_type = metadata.get("type", "scan_result")
+    
+    # Build file_tree from the payload
+    file_tree: list[dict] = []
+    
+    if payload_type == "scan_result":
+        # scan_result has a 'files' array with path, extension, content, etc.
+        for f in payload.get("files", []):
+            file_info = {
+                "path": f.get("path", ""),
+                "extension": f.get("extension", ""),
+                "language": _extension_to_language(f.get("extension", "")),
+                "line_count": f.get("lines", 0),
+                "size_bytes": f.get("size", 0),
+                "content": f.get("content", ""),
+                "category": f.get("category", "unknown"),
+                # Placeholders for tree-sitter metadata
+                "function_details": [],
+                "class_details": [],
+                "imports": [],
+                "functions": [],
+                "classes": [],
+            }
+            file_tree.append(file_info)
+    
+    elif payload_type == "diff_result":
+        # diff_result has a 'changes' array with path, type, content, stats
+        for change in payload.get("changes", []):
+            if change.get("type") == "deleted":
+                continue  # Skip deleted files from the analysis
+            file_info = {
+                "path": change.get("path", ""),
+                "extension": _get_extension(change.get("path", "")),
+                "language": _extension_to_language(_get_extension(change.get("path", ""))),
+                "line_count": 0,
+                "size_bytes": len(change.get("content", "")),
+                "content": change.get("content", ""),
+                "change_type": change.get("type", "modified"),
+                "stats": change.get("stats", {}),
+                # Placeholders for tree-sitter metadata
+                "function_details": [],
+                "class_details": [],
+                "imports": [],
+                "functions": [],
+                "classes": [],
+            }
+            file_tree.append(file_info)
+    
+    repo_name = metadata.get("project_name", "local-project")
+    repo_url = f"local://{repo_name}"
+    
+    return AgentState(
+        repo_path="",  # No local clone for MCP analysis
+        repo_url=repo_url,
+        job_id=job_id,
+        file_tree=file_tree,
+        dependency_graph={"nodes": [], "edges": []},
+        files_read=[],
+        files_to_read=[],
+        patterns_detected=[],
+        architecture_hypothesis=None,
+        confidence=0.0,
+        confidence_reasons=[],
+        reasoning_steps=[],
+        iteration=0,
+        max_iterations=max_iterations,
+        code_chunks=None,
+        embeddings_ready=False,
+        semantic_query=None,
+        semantic_results=None,
+        documentation=None,
+        documentation_files=None,
+        storage_path=None,
+        architecture_type=None,
+        improvements=[],
+        github_token=None,  # No PR creation in analysis mode
+        pr_url=None,
+        pr_number=None,
+        pr_branch=None,
+        error=None,
+    )
+
+
+def _extension_to_language(ext: str) -> str:
+    """Map a file extension to a language name."""
+    mapping = {
+        ".py": "python", ".js": "javascript", ".ts": "typescript",
+        ".tsx": "tsx", ".jsx": "jsx", ".java": "java",
+        ".c": "c", ".cpp": "cpp", ".h": "c", ".hpp": "cpp",
+        ".go": "go", ".rs": "rust", ".rb": "ruby",
+        ".php": "php", ".cs": "csharp", ".swift": "swift",
+        ".kt": "kotlin", ".scala": "scala", ".lua": "lua",
+        ".sh": "bash", ".yaml": "yaml", ".yml": "yaml",
+        ".json": "json", ".md": "markdown", ".html": "html",
+        ".css": "css", ".sql": "sql",
+    }
+    return mapping.get(ext.lower() if ext.startswith(".") else f".{ext}".lower(), "unknown")
+
+
+def _get_extension(path: str) -> str:
+    """Extract file extension from a path."""
+    import os
+    _, ext = os.path.splitext(path)
+    return ext
+
+
 # Architecture patterns that the agent can detect
 ARCHITECTURE_PATTERNS = {
     "clean_architecture": {
