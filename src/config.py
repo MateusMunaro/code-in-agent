@@ -49,6 +49,10 @@ class Settings(BaseSettings):
 # Global settings instance
 settings = Settings()
 
+# MCP Analysis Configuration
+MCP_RESULT_PREFIX = "mcp:result:"
+MCP_RESULT_TTL = 600  # 10 minutes
+
 
 def get_available_providers() -> list[str]:
     """Return list of configured LLM providers."""

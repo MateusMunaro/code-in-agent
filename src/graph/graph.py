@@ -75,9 +75,25 @@ def create_agent_graph(model_id: str = None) -> StateGraph:
     Returns:
         Compiled StateGraph ready for invocation
     """
+    from ..llm import check_providers_health, validate_model_before_use
+    
+    # Health check on startup
+    print("\n" + "=" * 70)
+    print("🏥 Pre-flight Health Check")
+    print("=" * 70)
+    check_providers_health()
+    print("=" * 70 + "\n")
+    
     # Initialize components
     chat = MultiModelChat(default_model=model_id)
     git_service = GitService(settings.repos_base_path)
+    
+    # Validate the selected model
+    actual_model = chat.default_model
+    is_valid, msg = validate_model_before_use(actual_model)
+    if not is_valid:
+        print(f"\n⚠️  WARNING: {msg}")
+        print(f"   The agent will attempt to proceed but may fail during execution.\n")
     
     # Create nodes
     read_structure = ReadStructureNode(chat, git_service)

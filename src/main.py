@@ -12,9 +12,9 @@ from datetime import datetime
 import redis.asyncio as redis
 from supabase import create_client, Client
 
-from .config import settings
+from .config import settings, MCP_RESULT_PREFIX, MCP_RESULT_TTL
 from .graph.graph import create_agent_graph
-from .graph.state import create_initial_state
+from .graph.state import create_initial_state, create_mcp_analysis_state
 from .services.git_service import GitService
 from .services.parser_service import ParserService
 from .services.graph_builder import GraphBuilder
@@ -23,6 +23,7 @@ from .services.graph_builder import GraphBuilder
 # Redis channels
 CHANNELS = {
     "JOB_QUEUE": "code-indexer:jobs",
+    "MCP_JOBS": "code-indexer:mcp-jobs",
     "JOB_STATUS": "code-indexer:status",
     "JOB_COMPLETE": "code-indexer:complete",
 }
@@ -93,7 +94,11 @@ class CodeIndexerWorker:
         )
 
     async def update_job_status(self, job_id: str, status: str, result: dict = None, error: str = None):
-        """Update job status in Supabase."""
+        """Update job status in Supabase.
+        
+        NOTE: user_id is NEVER included in update_data — the agent uses supabaseAdmin
+        (service role) and must never overwrite user ownership set by the backend.
+        """
         if not self.supabase:
             return
 
@@ -105,6 +110,9 @@ class CodeIndexerWorker:
             update_data["result"] = result
         if error:
             update_data["error_message"] = error
+
+        # Defensive: ensure user_id is never accidentally overwritten
+        update_data.pop("user_id", None)
 
         self.supabase.table("jobs").update(update_data).eq("id", job_id).execute()
 
@@ -138,11 +146,14 @@ class CodeIndexerWorker:
         repo_url = job_data["repo_url"]
         selected_model = job_data.get("selected_model", "gemini-2.5-flash")
         github_token = job_data.get("github_token")  # Token for PR creation
+        # user_id is preserved from the job record — agent never overwrites it
+        user_id = job_data.get("user_id")
 
         print(f"\n{'='*60}")
         print(f"📦 Processing job: {job_id}")
         print(f"📂 Repository: {repo_url}")
         print(f"🤖 Model: {selected_model}")
+        print(f"👤 User: {user_id or '(no user_id in message)'}")
         print(f"🔑 GitHub Token: {'✓ provided' if github_token else '✗ not provided'}")
         print(f"{'='*60}\n")
 
@@ -234,22 +245,170 @@ class CodeIndexerWorker:
             await self.update_job_status(job_id, "failed", error=error_msg)
             await self.publish_complete(job_id, False, error=error_msg)
 
+    # ─────────────────────────────────────────────
+    # MCP Analysis Handler (Dry-Run / Read-Only)
+    # ─────────────────────────────────────────────
+
+    async def process_mcp_job(self, mcp_data: dict):
+        """
+        Process an MCP analysis job (read-only, no clone/branch/PR).
+        
+        Flow: Payload → Build Context → LangGraph Analysis → Redis Result
+        """
+        job_id = mcp_data["job_id"]
+        payload = mcp_data.get("payload", {})
+        payload_type = mcp_data.get("payload_type", "scan_result")
+        selected_model = payload.get("metadata", {}).get("model", "gemini-2.5-flash")
+        # user_id is preserved from the job record — agent never overwrites it
+        user_id = mcp_data.get("user_id")
+
+        print(f"\n{'='*60}")
+        print(f"🔍 Processing MCP Analysis job: {job_id}")
+        print(f"📋 Payload type: {payload_type}")
+        print(f"🤖 Model: {selected_model}")
+        print(f"👤 User: {user_id or '(no user_id in message)'}")
+        print(f"{'='*60}\n")
+
+        try:
+            # Step 1: Build context from CLI payload (no clone!)
+            await self.publish_status(job_id, "processing", "Building context from local payload...", 10)
+            
+            initial_state = create_mcp_analysis_state(
+                payload=payload,
+                job_id=job_id,
+                max_iterations=3,  # Fewer iterations for analysis-only
+            )
+            
+            file_count = len(initial_state.get("file_tree", []))
+            print(f"✅ Built context: {file_count} files from payload")
+
+            # Step 2: Build dependency graph from payload file_tree
+            await self.publish_status(job_id, "processing", "Building dependency graph...", 30)
+            dep_graph = await self.graph_builder.build_graph("", initial_state["file_tree"])
+            initial_state["dependency_graph"] = dep_graph
+            print(f"✅ Dependency graph: {len(dep_graph.get('nodes', []))} nodes")
+
+            # Step 3: Run LangGraph agent (analysis only, no PR)
+            await self.publish_status(job_id, "processing", "Analyzing with AI agent...", 50)
+            agent = create_agent_graph(selected_model)
+            final_state = await agent.ainvoke(initial_state)
+            print(f"✅ Agent completed with confidence: {final_state.get('confidence', 0):.2f}")
+
+            # Step 4: Build result string
+            await self.publish_status(job_id, "processing", "Building analysis result...", 90)
+            
+            analysis_parts = []
+            
+            doc = final_state.get("documentation", "")
+            if doc:
+                analysis_parts.append(doc)
+            
+            arch = final_state.get("architecture_type")
+            if arch:
+                analysis_parts.append(f"\n## Architecture: {arch}")
+            
+            patterns = final_state.get("patterns_detected", [])
+            if patterns:
+                pattern_text = "\n## Detected Patterns\n"
+                for p in patterns:
+                    name = p.get("name", "Unknown") if isinstance(p, dict) else str(p)
+                    desc = p.get("description", "") if isinstance(p, dict) else ""
+                    pattern_text += f"- **{name}**: {desc}\n"
+                analysis_parts.append(pattern_text)
+            
+            improvements = final_state.get("improvements", [])
+            if improvements:
+                imp_text = "\n## Suggested Improvements\n"
+                for imp in improvements:
+                    imp_text += f"- {imp}\n"
+                analysis_parts.append(imp_text)
+            
+            result_text = "\n".join(analysis_parts) if analysis_parts else "Analysis completed but no documentation was generated."
+
+            analysis_result = {
+                "documentation": final_state.get("documentation", result_text),
+                "documentation_files": final_state.get("documentation_files", []),
+                "storage_path": final_state.get("storage_path"),
+                "patterns": final_state.get("patterns_detected", []),
+                "architecture_type": final_state.get("architecture_type", "unknown"),
+                "confidence_score": final_state.get("confidence", 0.0),
+                "reasoning_steps": final_state.get("reasoning_steps", []),
+                "dependencies_graph": dep_graph,
+                "suggested_improvements": final_state.get("improvements", []),
+                "pr_url": final_state.get("pr_url"),
+                "pr_number": final_state.get("pr_number"),
+                "pr_branch": final_state.get("pr_branch"),
+                "pr_status": "created" if final_state.get("pr_url") else "none",
+                "payload_type": payload_type,
+                "summary": result_text,
+            }
+
+            await self.save_analysis_result(job_id, analysis_result)
+
+            # Step 5: Write result to Redis with TTL
+            result_value = json.dumps({
+                "status": "COMPLETED",
+                "result": analysis_result,
+            })
+            await self.redis_client.set(
+                f"{MCP_RESULT_PREFIX}{job_id}",
+                result_value,
+                ex=MCP_RESULT_TTL,
+            )
+            print(f"✅ Result written to Redis key: {MCP_RESULT_PREFIX}{job_id} (TTL: {MCP_RESULT_TTL}s)")
+
+            # Also update Supabase if available
+            await self.update_job_status(job_id, "completed", result=analysis_result)
+            await self.publish_complete(job_id, True, result=analysis_result)
+
+            print(f"✅ MCP Analysis job {job_id} completed successfully!")
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ MCP Analysis job {job_id} failed: {error_msg}")
+
+            # Write failure to Redis with TTL
+            try:
+                fail_value = json.dumps({
+                    "status": "FAILED",
+                    "error": error_msg,
+                })
+                await self.redis_client.set(
+                    f"{MCP_RESULT_PREFIX}{job_id}",
+                    fail_value,
+                    ex=MCP_RESULT_TTL,
+                )
+            except Exception as redis_err:
+                print(f"❌ Failed to write error to Redis: {redis_err}")
+
+            await self.update_job_status(job_id, "failed", error=error_msg)
+            await self.publish_complete(job_id, False, error=error_msg)
+
     async def listen_for_jobs(self):
-        """Listen to Redis list for new jobs."""
-        print("👂 Listening for jobs...")
+        """Listen to Redis lists for new jobs (standard + MCP)."""
+        print("👂 Listening for jobs on queues:")
+        print(f"   📦 Standard: {CHANNELS['JOB_QUEUE']}")
+        print(f"   🔍 MCP:      {CHANNELS['MCP_JOBS']}")
 
         while self.running:
             try:
-                # BRPOP blocks until a message is available (or timeout)
+                # BRPOP blocks until a message is available on either queue
+                # Priority: MCP jobs first, then standard jobs
                 result = await self.redis_client.brpop(
-                    CHANNELS["JOB_QUEUE"],
+                    [CHANNELS["MCP_JOBS"], CHANNELS["JOB_QUEUE"]],
                     timeout=5
                 )
 
                 if result:
-                    _, message = result
+                    queue_name, message = result
+                    # queue_name is bytes, decode it
+                    queue_str = queue_name.decode() if isinstance(queue_name, bytes) else queue_name
                     job_data = json.loads(message)
-                    await self.process_job(job_data)
+
+                    if queue_str == CHANNELS["MCP_JOBS"]:
+                        await self.process_mcp_job(job_data)
+                    else:
+                        await self.process_job(job_data)
 
             except json.JSONDecodeError as e:
                 print(f"❌ Invalid job message: {e}")
@@ -263,7 +422,7 @@ class CodeIndexerWorker:
         self.running = False
 
         if self.redis_client:
-            await self.redis_client.close()
+            await self.redis_client.aclose()
 
         print("👋 Worker stopped")
 
