@@ -94,7 +94,11 @@ class CodeIndexerWorker:
         )
 
     async def update_job_status(self, job_id: str, status: str, result: dict = None, error: str = None):
-        """Update job status in Supabase."""
+        """Update job status in Supabase.
+        
+        NOTE: user_id is NEVER included in update_data — the agent uses supabaseAdmin
+        (service role) and must never overwrite user ownership set by the backend.
+        """
         if not self.supabase:
             return
 
@@ -106,6 +110,9 @@ class CodeIndexerWorker:
             update_data["result"] = result
         if error:
             update_data["error_message"] = error
+
+        # Defensive: ensure user_id is never accidentally overwritten
+        update_data.pop("user_id", None)
 
         self.supabase.table("jobs").update(update_data).eq("id", job_id).execute()
 
@@ -139,11 +146,14 @@ class CodeIndexerWorker:
         repo_url = job_data["repo_url"]
         selected_model = job_data.get("selected_model", "gemini-2.5-flash")
         github_token = job_data.get("github_token")  # Token for PR creation
+        # user_id is preserved from the job record — agent never overwrites it
+        user_id = job_data.get("user_id")
 
         print(f"\n{'='*60}")
         print(f"📦 Processing job: {job_id}")
         print(f"📂 Repository: {repo_url}")
         print(f"🤖 Model: {selected_model}")
+        print(f"👤 User: {user_id or '(no user_id in message)'}")
         print(f"🔑 GitHub Token: {'✓ provided' if github_token else '✗ not provided'}")
         print(f"{'='*60}\n")
 
@@ -249,11 +259,14 @@ class CodeIndexerWorker:
         payload = mcp_data.get("payload", {})
         payload_type = mcp_data.get("payload_type", "scan_result")
         selected_model = payload.get("metadata", {}).get("model", "gemini-2.5-flash")
+        # user_id is preserved from the job record — agent never overwrites it
+        user_id = mcp_data.get("user_id")
 
         print(f"\n{'='*60}")
         print(f"🔍 Processing MCP Analysis job: {job_id}")
         print(f"📋 Payload type: {payload_type}")
         print(f"🤖 Model: {selected_model}")
+        print(f"👤 User: {user_id or '(no user_id in message)'}")
         print(f"{'='*60}\n")
 
         try:
@@ -312,10 +325,30 @@ class CodeIndexerWorker:
             
             result_text = "\n".join(analysis_parts) if analysis_parts else "Analysis completed but no documentation was generated."
 
+            analysis_result = {
+                "documentation": final_state.get("documentation", result_text),
+                "documentation_files": final_state.get("documentation_files", []),
+                "storage_path": final_state.get("storage_path"),
+                "patterns": final_state.get("patterns_detected", []),
+                "architecture_type": final_state.get("architecture_type", "unknown"),
+                "confidence_score": final_state.get("confidence", 0.0),
+                "reasoning_steps": final_state.get("reasoning_steps", []),
+                "dependencies_graph": dep_graph,
+                "suggested_improvements": final_state.get("improvements", []),
+                "pr_url": final_state.get("pr_url"),
+                "pr_number": final_state.get("pr_number"),
+                "pr_branch": final_state.get("pr_branch"),
+                "pr_status": "created" if final_state.get("pr_url") else "none",
+                "payload_type": payload_type,
+                "summary": result_text,
+            }
+
+            await self.save_analysis_result(job_id, analysis_result)
+
             # Step 5: Write result to Redis with TTL
             result_value = json.dumps({
                 "status": "COMPLETED",
-                "result": result_text,
+                "result": analysis_result,
             })
             await self.redis_client.set(
                 f"{MCP_RESULT_PREFIX}{job_id}",
@@ -325,8 +358,8 @@ class CodeIndexerWorker:
             print(f"✅ Result written to Redis key: {MCP_RESULT_PREFIX}{job_id} (TTL: {MCP_RESULT_TTL}s)")
 
             # Also update Supabase if available
-            await self.update_job_status(job_id, "completed", result={"success": True})
-            await self.publish_complete(job_id, True, result={"documentation": result_text[:500]})
+            await self.update_job_status(job_id, "completed", result=analysis_result)
+            await self.publish_complete(job_id, True, result=analysis_result)
 
             print(f"✅ MCP Analysis job {job_id} completed successfully!")
 
