@@ -18,12 +18,15 @@ from .graph.state import create_initial_state, create_mcp_analysis_state
 from .services.git_service import GitService
 from .services.parser_service import ParserService
 from .services.graph_builder import GraphBuilder
+from .services.conflict_analyzer import ConflictAnalyzer
+
 
 
 # Redis channels
 CHANNELS = {
     "JOB_QUEUE": "code-indexer:jobs",
     "MCP_JOBS": "code-indexer:mcp-jobs",
+    "CONFLICT_JOBS": "code-indexer:conflict-jobs",
     "JOB_STATUS": "code-indexer:status",
     "JOB_COMPLETE": "code-indexer:complete",
 }
@@ -384,29 +387,140 @@ class CodeIndexerWorker:
             await self.update_job_status(job_id, "failed", error=error_msg)
             await self.publish_complete(job_id, False, error=error_msg)
 
+    # ─────────────────────────────────────────────
+    # Conflict Analysis Handler
+    # ─────────────────────────────────────────────
+
+    async def process_conflict_job(self, job_data: dict):
+        """
+        Process a multi-branch conflict analysis job.
+
+        Flow:
+        1. Clone repository (full, no shallow)
+        2. Validate requested branches exist
+        3. Compute diffs between all branch pairs
+        4. Run semantic analysis + LLM conflict detection
+        5. Save results to Supabase + Redis
+        """
+        job_id = job_data["job_id"]
+        repo_url = job_data["repo_url"]
+        branches = job_data.get("branches", [])
+        selected_model = job_data.get("selected_model", "gemini-2.5-flash")
+        user_id = job_data.get("user_id")
+
+        print(f"\n{'='*60}")
+        print(f"🔀 Processing Conflict Analysis job: {job_id}")
+        print(f"📂 Repository: {repo_url}")
+        print(f"🌿 Branches: {branches}")
+        print(f"🤖 Model: {selected_model}")
+        print(f"👤 User: {user_id or '(no user_id)'}")
+        print(f"{'='*60}\n")
+
+        try:
+            # Step 1: Full clone (need all branches)
+            await self.publish_status(job_id, "processing", "Cloning repository (full)...", 10)
+            repo_path = await self.git_service.clone_repository_full(repo_url, job_id)
+            print(f"✅ Full clone completed: {repo_path}")
+
+            # Step 2: Run conflict analysis
+            await self.publish_status(job_id, "processing", "Analyzing branches for conflicts...", 30)
+
+            from .llm.provider import MultiModelChat
+            chat = MultiModelChat(default_model=selected_model)
+            analyzer = ConflictAnalyzer(chat, self.git_service)
+
+            state = await analyzer.analyze(
+                repo_url=repo_url,
+                repo_path=repo_path,
+                branches=branches,
+                job_id=job_id,
+                model_id=selected_model,
+            )
+
+            if state.get("error"):
+                raise RuntimeError(state["error"])
+
+            print(f"✅ Conflict analysis completed:")
+            print(f"   🔍 Risks found: {len(state['conflict_risks'])}")
+            print(f"   📊 Overlapping files: {len(state['overlapping_files'])}")
+            print(f"   📐 Merge order: {state['merge_order_suggestion']}")
+
+            # Step 3: Build result
+            await self.publish_status(job_id, "processing", "Building analysis report...", 80)
+            summary = analyzer.build_result_summary(state)
+
+            analysis_result = {
+                "documentation": summary,
+                "documentation_files": [],
+                "storage_path": None,
+                "patterns": [],
+                "architecture_type": "conflict_analysis",
+                "confidence_score": state.get("confidence", 0.0),
+                "reasoning_steps": [],
+                "dependencies_graph": {},
+                "suggested_improvements": state.get("general_recommendations", []),
+                # Conflict-specific data
+                "conflict_analysis": {
+                    "branches": state["branches"],
+                    "conflict_risks": state["conflict_risks"],
+                    "overlapping_files": state["overlapping_files"],
+                    "branch_files": state["branch_files"],
+                    "semantic_context": state["semantic_context"],
+                    "merge_order_suggestion": state["merge_order_suggestion"],
+                    "general_recommendations": state["general_recommendations"],
+                },
+                "pr_url": None,
+                "pr_number": None,
+                "pr_branch": None,
+                "pr_status": "none",
+            }
+
+            # Save to Supabase
+            await self.save_analysis_result(job_id, analysis_result)
+            await self.update_job_status(job_id, "completed", result={"success": True})
+            await self.publish_complete(job_id, True, result=analysis_result)
+
+            print(f"✅ Conflict Analysis job {job_id} completed successfully!")
+
+            # Cleanup
+            await self.git_service.cleanup(repo_path)
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Conflict Analysis job {job_id} failed: {error_msg}")
+
+            await self.update_job_status(job_id, "failed", error=error_msg)
+            await self.publish_complete(job_id, False, error=error_msg)
+
     async def listen_for_jobs(self):
-        """Listen to Redis lists for new jobs (standard + MCP)."""
+        """Listen to Redis lists for new jobs (standard + MCP + conflict)."""
         print("👂 Listening for jobs on queues:")
-        print(f"   📦 Standard: {CHANNELS['JOB_QUEUE']}")
-        print(f"   🔍 MCP:      {CHANNELS['MCP_JOBS']}")
+        print(f"   📦 Standard:  {CHANNELS['JOB_QUEUE']}")
+        print(f"   🔍 MCP:       {CHANNELS['MCP_JOBS']}")
+        print(f"   🔀 Conflict:  {CHANNELS['CONFLICT_JOBS']}")
 
         while self.running:
             try:
-                # BRPOP blocks until a message is available on either queue
-                # Priority: MCP jobs first, then standard jobs
+                # BRPOP blocks until a message is available on any queue
+                # Priority: MCP > Conflict > Standard
                 result = await self.redis_client.brpop(
-                    [CHANNELS["MCP_JOBS"], CHANNELS["JOB_QUEUE"]],
+                    [
+                        CHANNELS["MCP_JOBS"],
+                        CHANNELS["CONFLICT_JOBS"],
+                        CHANNELS["JOB_QUEUE"],
+                    ],
                     timeout=5
                 )
 
                 if result:
                     queue_name, message = result
-                    # queue_name is bytes, decode it
                     queue_str = queue_name.decode() if isinstance(queue_name, bytes) else queue_name
                     job_data = json.loads(message)
 
                     if queue_str == CHANNELS["MCP_JOBS"]:
                         await self.process_mcp_job(job_data)
+                    elif queue_str == CHANNELS["CONFLICT_JOBS"]:
+                        await self.process_conflict_job(job_data)
                     else:
                         await self.process_job(job_data)
 

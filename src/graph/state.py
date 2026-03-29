@@ -292,6 +292,105 @@ def _get_extension(path: str) -> str:
     return ext
 
 
+# ─────────────────────────────────────────────
+# Conflict Analysis Types
+# ─────────────────────────────────────────────
+
+class BranchDiff(TypedDict):
+    """Diff information between two branches."""
+    branch_a: str
+    branch_b: str
+    files_changed: list[dict]  # List of file change dicts from git_service
+    stats: dict  # total_files, total_insertions, total_deletions
+
+
+class ConflictRisk(TypedDict):
+    """A detected conflict risk between branches."""
+    file_path: str
+    risk_level: str  # "high", "medium", "low"
+    conflicting_branches: list[str]
+    description: str
+    recommendation: str
+
+
+class ConflictAnalysisState(TypedDict):
+    """
+    State for the branch conflict analysis pipeline.
+
+    Unlike AgentState which flows through a LangGraph reasoning loop,
+    this state is used by the ConflictAnalyzer service for a linear
+    analysis flow.
+    """
+    # Job info
+    job_id: str
+    repo_url: str
+    repo_path: str
+
+    # Branches to analyze
+    branches: list[str]
+
+    # Diffs between all branch pairs
+    branch_diffs: list[BranchDiff]
+
+    # Files modified per branch (branch_name -> list of file paths)
+    branch_files: dict[str, list[str]]
+
+    # Overlapping files (files modified by multiple branches)
+    overlapping_files: dict[str, list[str]]  # file_path -> [branch names]
+
+    # Conflict risks detected by LLM
+    conflict_risks: list[ConflictRisk]
+
+    # LLM recommendations
+    general_recommendations: list[str]
+    merge_order_suggestion: list[str]
+
+    # Semantic context extracted from branches
+    semantic_context: dict  # branch_name -> semantic summary
+
+    # Confidence
+    confidence: float
+
+    # Error
+    error: Optional[str]
+
+
+def create_conflict_analysis_state(
+    job_id: str,
+    repo_url: str,
+    repo_path: str,
+    branches: list[str],
+) -> ConflictAnalysisState:
+    """
+    Create the initial state for conflict analysis.
+
+    Args:
+        job_id: Job ID for tracking
+        repo_url: Repository URL
+        repo_path: Path to the cloned repository
+        branches: List of branch names to analyze
+
+    Returns:
+        Initial ConflictAnalysisState
+    """
+    return ConflictAnalysisState(
+        job_id=job_id,
+        repo_url=repo_url,
+        repo_path=repo_path,
+        branches=branches,
+        branch_diffs=[],
+        branch_files={},
+        overlapping_files={},
+        conflict_risks=[],
+        general_recommendations=[],
+        merge_order_suggestion=[],
+        semantic_context={},
+        confidence=0.0,
+        error=None,
+    )
+
+
+
 # Architecture patterns that the agent can detect
 ARCHITECTURE_PATTERNS = {
     "clean_architecture": {
